@@ -16,6 +16,7 @@ import { VesselStateRepository } from './shared/vessel-state.repository.js';
 import { TranshipmentPairsRepository } from './transhipment/transhipment-pairs.repository.js';
 import { TranshipmentPairStorage } from './transhipment/transhipment-pairs.storage.js';
 import { TranshipmentDetector } from './transhipment/transhipment.detector.js';
+import { TranshipmentMetrics } from './transhipment/transhipment.metrics.js';
 
 /**
  * Neighbour index window of the SDK `PairSearch`, ms: pruning keeps points
@@ -57,6 +58,7 @@ const PAIR_SEARCH_MAX_AGE_MS = 30 * 60_000;
           writeIntervalMs: config.VESSEL_STATE_WRITE_INTERVAL_S * 1_000,
         }),
     },
+    TranshipmentMetrics,
     TranshipmentDetector,
     AnomalyDetector,
     DarkDetector,

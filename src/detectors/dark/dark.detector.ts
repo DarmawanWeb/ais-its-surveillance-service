@@ -93,17 +93,18 @@ export class DarkDetector implements Detector<DarkConfig> {
   ): Promise<void> {
     await this.recorder.observe(context.zones, position);
     const key = darkKey(position.mmsi);
-    const open = context.alerts.get(key);
-    if (open === undefined) return;
-    // The pipeline's `previous` is the last position before the gap.
-    const lastSeen = position.previous?.time ?? open.openedAt;
+    if (!context.alerts.isOpen(key)) return;
+    // The pipeline's `previous` is the last position before the gap (the
+    // occurrence's `openedAt` is the raise time, not the last sighting).
+    const lastSeen = position.previous?.time ?? null;
     await context.alerts.resolve(key, {
       at: position.time,
       reason: 'AIS reports resumed',
       data: {
         reappearedAt: position.time.toISOString(),
-        lastSeenAt: lastSeen.toISOString(),
-        gapMin: minutesBetween(lastSeen, position.time),
+        lastSeenAt: lastSeen?.toISOString() ?? null,
+        gapMin:
+          lastSeen === null ? null : minutesBetween(lastSeen, position.time),
         lat: position.lat,
         lon: position.lon,
       },

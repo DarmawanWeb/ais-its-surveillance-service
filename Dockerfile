@@ -52,6 +52,8 @@ COPY --from=prod-deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json ./
 COPY --chown=node:node migrations ./migrations
+# Reference data of `pnpm seed` / `node dist/seed.js` (historical fishing violations).
+COPY --chown=node:node seeds ./seeds
 USER node
 EXPOSE 3007
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \

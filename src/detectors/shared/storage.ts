@@ -80,7 +80,11 @@ export abstract class VesselStateStorage {
   /** Candidate neighbours within a radius and a time range (`ST_DWithin`). */
   abstract neighbours(query: StoredNeighbourQuery): Promise<StoredNeighbour[]>;
 
-  /** Vessels last seen in `[seenAfter, seenBefore)` while moving faster than `minSogKn`. */
+  /**
+   * Vessels last seen in `[seenAfter, seenBefore)` while moving faster than
+   * `minSogKn`, most recently seen first (the vessels that just went silent
+   * are examined even when more than `limit` qualify).
+   */
   abstract silent(query: SilentVesselsQuery): Promise<StoredVesselState[]>;
 }
 

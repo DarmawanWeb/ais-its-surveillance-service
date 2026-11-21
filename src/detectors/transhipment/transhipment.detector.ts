@@ -34,6 +34,7 @@ import {
   pairMapKey,
   TranshipmentPairStorage,
 } from './transhipment-pairs.storage.js';
+import { TranshipmentMetrics } from './transhipment.metrics.js';
 
 /** Alert type of the detector (contracts `ALERT_TYPES.transhipment`). */
 export const TRANSHIPMENT_ALERT = 'transhipment';
@@ -113,6 +114,7 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     private readonly states: VesselStateStorage,
     private readonly tracks: TrackStorage,
     private readonly pairs: TranshipmentPairStorage,
+    private readonly metrics: TranshipmentMetrics,
   ) {}
 
   async onPosition(
@@ -126,8 +128,9 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     await this.tracks.append(position);
     const neighbours = await this.neighbours(context, position);
     const observations = candidateObservations(position, neighbours);
-    if (observations.length > 0)
-      await this.pairs.accumulate(observations, context.now());
+    if (observations.length === 0) return;
+    await this.pairs.accumulate(observations, context.now());
+    this.metrics.observed(observations.length);
   }
 
   async onTick(
@@ -169,6 +172,7 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     if (this.analysisRuns % PRUNE_EVERY_RUNS === 0) {
       await this.pairs.prune(new Date(now.getTime() - PAIR_RETENTION_MS));
     }
+    this.metrics.queue(await this.pairs.countByStatus());
   }
 
   /** Candidate vessel: from a watched AIS source or inside a watched zone. */
@@ -264,6 +268,7 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
           { outcome: 'insufficient_data', result: sizes },
           now,
         );
+        this.metrics.analysed('insufficient_data');
         return;
       }
 
@@ -284,12 +289,14 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
         { outcome: 'analysed', result: { ...serialize(detection), ...sizes } },
         now,
       );
+      this.metrics.analysed(detection.isIllegal ? 'illegal' : 'clean');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       context.logger.error(
         `Analysis of ${pair.mmsiA}-${pair.mmsiB} failed: ${message}`,
       );
       await this.pairs.fail(pair, message, now);
+      this.metrics.analysed('failed');
     }
   }
 

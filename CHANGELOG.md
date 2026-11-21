@@ -2,17 +2,54 @@
 
 All notable changes to `ais-its-surveillance-service` are documented in this file. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the service adheres to
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html). The first release is `0.1.0`
-(`package.json`): on release, move the entries below under `## [0.1.0] - <date>` and tag `v0.1.0`.
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-21
+
 ### Added
 
-- Service scaffold generated from the platform template (`templates/nest-service`): configuration,
-  health, metrics, OpenAPI, authentication, migrations, CI, Docker image and
-  `GET /api/v2/surveillance/methodology`.
-- Detector SDK wiring: `events` hypertable, `GET /api/v2/surveillance/detectors` and the toy
-  `speed_limit` detector.
+- Illegal-activity analytics of spec §13.8 on the Detector SDK (§18): five detectors registered
+  with `@RegisterDetector()`, enabled per instance with `DETECTORS`, configured through their
+  `<ID>_*` namespaces (zod, spec defaults) and isolated from each other's failures.
+- **transhipment** — legacy illegal-transhipment parity without the Mongo queue and polling:
+  candidate vessels (source `batam` or inside `transhipment_area` zones) seen within 5 min within
+  600 m (SDK `PairSearch`, plus `ST_DWithin` on `vessel_state` while the index is cold) scored
+  with the legacy speed × location × heading priorities and accumulated in `transhipment_pairs`;
+  a scheduled analyser claims pairs by priority (`FOR UPDATE SKIP LOCKED`, legacy queue order
+  and 15-min re-analysis cool-down) and runs the legacy interpolation / sliding-window detection
+  over `track_points`; results become events with accuracy, window, average priority and
+  priority distribution. Pure functions in `src/domain/transhipment` with golden tests computed
+  from the legacy code.
+- **anomaly** — navstatus anomaly (legacy web app rule) sustained for `ANOMALY_MIN_POSITIONS`
+  consecutive positions, resolved by the first consistent position; streak persisted in
+  `vessel_state.anomaly_streak`.
+- **dark** — AIS gap: last seen more than 30 min before the feed's event-time watermark while
+  moving faster than 1 kn and more than 5 km from any `port` / `anchorage` zone; resolved when
+  the vessel reappears.
+- **geofence** — entry into active `restricted` / `mpa` / `custom` zones with `alertOnEnter`
+  (global zones for every vessel, organization zones for the organization's vessels), resolved
+  on exit or when the zone stops alerting.
+- **fishing** — loitering pattern (0.5–4 kn, mean course-change rate ≥ 3 °/min between fixes
+  ≥ 3 min apart, ≥ 30 min, ≥ 6 fixes) inside `fishing_ground` / `restricted` zones.
+- Events: `events` hypertable written by the SDK persistence hook before `alert.raised.v1` is
+  published (`alert.v1.<type>.<mmsi>`), every event with `methodId`, a stable `dedupKey`, the SDK
+  cool-down and a documented severity mapping; review lifecycle `open → confirmed | dismissed`
+  kept apart from the detector lifecycle (`resolved_at`).
+- Projections `zones` (GEO, durable `surveillance-zones`) and `vessels` (FLEET, durable
+  `surveillance-fleet`), idempotent by snapshot time with tombstones.
+- API (`/api/v2/surveillance`): `GET /events`, `GET /events/:id`, `PATCH /events/:id`
+  (`surveillance:review`, audited), `GET /transhipments` (legacy result shape), `GET /heatmap`
+  (`ST_SnapToGrid`, `cellKm`), `GET /fishing-violations`, `GET /stats`, `GET /detectors`,
+  `GET /methodology`; tenancy of spec §8.5 enforced in SQL from the FLEET projection.
+- `pnpm seed`: idempotent import of the 403 historical fishing apprehensions of the legacy web app
+  (`ilegal.json`) into `fishing_violations` with provenance notes.
+- `events_tiles` view (geometry) for an authority-only tile endpoint; deliberately not granted to
+  `tiles_ro` (spec §13.8: events stay out of Martin).
+- Domain metrics `aisits_surveillance_transhipment_observations_total`,
+  `aisits_surveillance_transhipment_analyses_total{outcome}` and
+  `aisits_surveillance_transhipment_pairs{status}`, next to the SDK detector metrics.
 
-[Unreleased]: https://github.com/DarmawanWeb/ais-its-surveillance-service/commits/main
+[Unreleased]: https://github.com/DarmawanWeb/ais-its-surveillance-service/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/DarmawanWeb/ais-its-surveillance-service/releases/tag/v0.1.0

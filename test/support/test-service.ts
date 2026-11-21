@@ -42,6 +42,8 @@ export async function startTestService(
     DATABASE_SCHEMA: SERVICE.schema,
     DB_MIGRATE_ON_BOOT: 'true',
     NATS_URL: infra.natsUrl,
+    // `TEST_LOG_LEVEL=debug pnpm test:int` shows the service logs (silent by default).
+    LOG_LEVEL: process.env.TEST_LOG_LEVEL ?? 'silent',
     ...env,
   });
   const app = await buildTestApp(AppModule, {

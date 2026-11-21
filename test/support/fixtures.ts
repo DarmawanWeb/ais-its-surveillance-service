@@ -69,7 +69,9 @@ export class Fixtures {
     this.pool = app.get<unknown, Pool>(PG_POOL);
   }
 
-  async zone(input: Parameters<typeof makeTestZone>[0]): Promise<ZoneSnapshotV1> {
+  async zone(
+    input: Parameters<typeof makeTestZone>[0],
+  ): Promise<ZoneSnapshotV1> {
     const zone = makeTestZone(input);
     await this.publisher.publishEvent(EVENT_TYPES.GEO_ZONE_UPSERTED, zone);
     return zone;
@@ -79,7 +81,10 @@ export class Fixtures {
     input: Partial<VesselSnapshotV1> & Pick<VesselSnapshotV1, 'mmsi'>,
   ): Promise<VesselSnapshotV1> {
     const vessel = makeTestVesselSnapshot(input);
-    await this.publisher.publishEvent(EVENT_TYPES.FLEET_VESSEL_UPSERTED, vessel);
+    await this.publisher.publishEvent(
+      EVENT_TYPES.FLEET_VESSEL_UPSERTED,
+      vessel,
+    );
     return vessel;
   }
 

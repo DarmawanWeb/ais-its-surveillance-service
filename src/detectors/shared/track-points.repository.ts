@@ -7,6 +7,7 @@ import {
 import { Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
 
+import { type RawTimestamp, rowDate } from '../../db/rows.js';
 import type * as schema from '../../db/schema.js';
 import type { TrackFix } from '../../domain/transhipment/track.js';
 import { TrackStorage } from './storage.js';
@@ -34,7 +35,7 @@ export class TrackPointsRepository extends TrackStorage {
     maxPoints: number,
   ): Promise<TrackFix[]> {
     const { rows } = await this.db.execute<{
-      time: Date;
+      time: RawTimestamp;
       lat: number;
       lon: number;
       sog: number;
@@ -50,7 +51,7 @@ export class TrackPointsRepository extends TrackStorage {
       ) AS latest
       ORDER BY time`);
     return rows.map((row) => ({
-      time: row.time,
+      time: rowDate(row.time),
       lat: row.lat,
       lon: row.lon,
       sog: row.sog,

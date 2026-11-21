@@ -11,6 +11,7 @@ import {
 import { Injectable } from '@nestjs/common';
 import { type SQL, sql } from 'drizzle-orm';
 
+import { type RawTimestamp, rowDate, rowDateOrNull } from '../../db/rows.js';
 import type * as schema from '../../db/schema.js';
 import {
   type EventVisibility,
@@ -79,7 +80,7 @@ export interface EventReview {
 
 interface EventRow extends Record<string, unknown> {
   id: string;
-  time: Date;
+  time: RawTimestamp;
   detector: string;
   type: string;
   domain: 'safety' | 'surveillance';
@@ -99,14 +100,14 @@ interface EventRow extends Record<string, unknown> {
   dedup_key: string;
   data: Record<string, unknown>;
   status: SurveillanceEventStatus;
-  opened_at: Date;
-  last_seen_at: Date;
-  resolved_at: Date | null;
+  opened_at: RawTimestamp;
+  last_seen_at: RawTimestamp;
+  resolved_at: RawTimestamp | null;
   resolution: Record<string, unknown> | null;
   reviewed_by: string | null;
-  reviewed_at: Date | null;
+  reviewed_at: RawTimestamp | null;
   note: string | null;
-  created_at: Date;
+  created_at: RawTimestamp;
 }
 
 const SELECT_EVENTS = sql`
@@ -125,7 +126,7 @@ const SELECT_EVENTS = sql`
 function toRecord(row: EventRow): EventRecord {
   return {
     id: row.id,
-    time: row.time,
+    time: rowDate(row.time),
     detector: row.detector,
     type: row.type,
     domain: row.domain,
@@ -145,14 +146,14 @@ function toRecord(row: EventRow): EventRecord {
     dedupKey: row.dedup_key,
     data: row.data,
     status: row.status,
-    openedAt: row.opened_at,
-    lastSeenAt: row.last_seen_at,
-    resolvedAt: row.resolved_at,
+    openedAt: rowDate(row.opened_at),
+    lastSeenAt: rowDate(row.last_seen_at),
+    resolvedAt: rowDateOrNull(row.resolved_at),
     resolution: row.resolution,
     reviewedBy: row.reviewed_by,
-    reviewedAt: row.reviewed_at,
+    reviewedAt: rowDateOrNull(row.reviewed_at),
     note: row.note,
-    createdAt: row.created_at,
+    createdAt: rowDate(row.created_at),
   };
 }
 

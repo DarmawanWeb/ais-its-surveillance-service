@@ -11,6 +11,7 @@ import {
 import { Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
 
+import { type RawTimestamp, rowDate } from '../../db/rows.js';
 import type * as schema from '../../db/schema.js';
 import {
   type SilentVesselsQuery,
@@ -23,7 +24,7 @@ import {
 /** A `vessel_state` row as selected by the queries below. */
 interface VesselStateRow extends Record<string, unknown> {
   mmsi: number;
-  time: Date;
+  time: RawTimestamp;
   source: AisSource;
   lat: number;
   lon: number;
@@ -41,7 +42,7 @@ const STATE_COLUMNS = sql`mmsi, time, source, ST_Y(geom::geometry) AS lat, ST_X(
 function toState(row: VesselStateRow): StoredVesselState {
   return {
     mmsi: row.mmsi,
-    time: row.time,
+    time: rowDate(row.time),
     source: row.source,
     lat: row.lat,
     lon: row.lon,
@@ -125,7 +126,7 @@ export class VesselStateRepository extends VesselStateStorage {
       WHERE time < ${query.seenBefore}
         AND time >= ${query.seenAfter}
         AND sog > ${query.minSogKn}
-      ORDER BY time
+      ORDER BY time DESC
       LIMIT ${query.limit}`);
     return rows.map(toState);
   }

@@ -1,5 +1,6 @@
 import type { ZoneSnapshotV1 } from '@darmawanweb/ais-its-contracts/events';
 import { DetectorTestHarness } from '@darmawanweb/ais-its-nest/analytics';
+import { MetricsService } from '@darmawanweb/ais-its-nest/metrics';
 import { describe, expect, it } from 'vitest';
 
 import { AnomalyDetector } from './anomaly/anomaly.detector.js';
@@ -13,6 +14,7 @@ import {
 } from './shared/__testing__/memory-storage.js';
 import { VesselStateRecorder } from './shared/vessel-state.recorder.js';
 import { TranshipmentDetector } from './transhipment/transhipment.detector.js';
+import { TranshipmentMetrics } from './transhipment/transhipment.metrics.js';
 
 const SQUARE: ZoneSnapshotV1['geometry'] = {
   type: 'Polygon',
@@ -33,7 +35,13 @@ function allDetectors(tracks = new MemoryTracks()) {
   return {
     states,
     detectors: [
-      new TranshipmentDetector(recorder, states, tracks, new MemoryPairs()),
+      new TranshipmentDetector(
+        recorder,
+        states,
+        tracks,
+        new MemoryPairs(),
+        new TranshipmentMetrics(new MetricsService()),
+      ),
       new AnomalyDetector(recorder, states),
       new DarkDetector(recorder, states),
       new GeofenceDetector(recorder),

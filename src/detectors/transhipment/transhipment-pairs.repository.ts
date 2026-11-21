@@ -2,7 +2,9 @@ import { type Database, InjectDb } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
 
+import { type RawTimestamp, rowDate } from '../../db/rows.js';
 import type * as schema from '../../db/schema.js';
+import type { TranshipmentPairStatus } from '../../db/schema.js';
 import type { PairObservation } from '../../domain/transhipment/pairs.js';
 import {
   type ClaimedPair,
@@ -16,9 +18,9 @@ interface ClaimedRow extends Record<string, unknown> {
   mmsi_a: number;
   mmsi_b: number;
   priority: number;
-  queued_at: Date;
-  first_seen_at: Date;
-  last_seen_at: Date;
+  queued_at: RawTimestamp;
+  first_seen_at: RawTimestamp;
+  last_seen_at: RawTimestamp;
   observations: number;
   last_distance_m: number | null;
 }
@@ -121,9 +123,9 @@ export class TranshipmentPairsRepository extends TranshipmentPairStorage {
         mmsiA: row.mmsi_a,
         mmsiB: row.mmsi_b,
         priority: row.priority,
-        queuedAt: row.queued_at,
-        firstSeenAt: row.first_seen_at,
-        lastSeenAt: row.last_seen_at,
+        queuedAt: rowDate(row.queued_at),
+        firstSeenAt: rowDate(row.first_seen_at),
+        lastSeenAt: rowDate(row.last_seen_at),
         observations: row.observations,
         lastDistanceM: row.last_distance_m,
       }))
@@ -193,7 +195,7 @@ export class TranshipmentPairsRepository extends TranshipmentPairStorage {
     const { rows } = await this.db.execute<{
       mmsi_a: number;
       mmsi_b: number;
-      last_seen_at: Date;
+      last_seen_at: RawTimestamp;
     }>(sql`
       SELECT p.mmsi_a, p.mmsi_b, p.last_seen_at
       FROM transhipment_pairs AS p
@@ -202,7 +204,10 @@ export class TranshipmentPairsRepository extends TranshipmentPairStorage {
         ${sql.param(pairs.map(([, b]) => b))}::integer[]
       ) AS u(mmsi_a, mmsi_b) ON p.mmsi_a = u.mmsi_a AND p.mmsi_b = u.mmsi_b`);
     return new Map(
-      rows.map((row) => [pairMapKey(row.mmsi_a, row.mmsi_b), row.last_seen_at]),
+      rows.map((row) => [
+        pairMapKey(row.mmsi_a, row.mmsi_b),
+        rowDate(row.last_seen_at),
+      ]),
     );
   }
 
@@ -211,5 +216,17 @@ export class TranshipmentPairsRepository extends TranshipmentPairStorage {
       DELETE FROM transhipment_pairs
       WHERE status IN ('completed', 'failed') AND last_seen_at < ${seenBefore}`);
     return rowCount ?? 0;
+  }
+
+  async countByStatus(): Promise<
+    Readonly<Partial<Record<TranshipmentPairStatus, number>>>
+  > {
+    const { rows } = await this.db.execute<{
+      status: TranshipmentPairStatus;
+      count: number;
+    }>(
+      sql`SELECT status, count(*)::integer AS count FROM transhipment_pairs GROUP BY status`,
+    );
+    return Object.fromEntries(rows.map((row) => [row.status, row.count]));
   }
 }

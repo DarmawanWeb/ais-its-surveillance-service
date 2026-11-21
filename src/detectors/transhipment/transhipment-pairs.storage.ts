@@ -1,3 +1,4 @@
+import type { TranshipmentPairStatus } from '../../db/schema.js';
 import type { PairObservation } from '../../domain/transhipment/pairs.js';
 
 /** A candidate pair claimed by the analyser. */
@@ -86,6 +87,11 @@ export abstract class TranshipmentPairStorage {
 
   /** Deletes finished pairs not observed since `seenBefore`; returns how many. */
   abstract prune(seenBefore: Date): Promise<number>;
+
+  /** Number of pairs per queue status (statuses without pairs are absent). */
+  abstract countByStatus(): Promise<
+    Readonly<Partial<Record<TranshipmentPairStatus, number>>>
+  >;
 }
 
 /** Map key of a pair in {@link TranshipmentPairStorage.lastSeen} results. */

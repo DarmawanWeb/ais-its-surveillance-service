@@ -5,6 +5,7 @@ import {
   type VesselPosition,
 } from '@darmawanweb/ais-its-nest/analytics';
 
+import type { TranshipmentPairStatus } from '../../../db/schema.js';
 import type { PairObservation } from '../../../domain/transhipment/pairs.js';
 import type { TrackFix } from '../../../domain/transhipment/track.js';
 import {
@@ -90,7 +91,7 @@ export class MemoryVesselStates extends VesselStateStorage {
           state.time >= query.seenAfter &&
           state.sog > query.minSogKn,
       )
-      .sort((a, b) => a.time.getTime() - b.time.getTime())
+      .sort((a, b) => b.time.getTime() - a.time.getTime())
       .slice(0, query.limit);
   }
 }
@@ -321,6 +322,16 @@ export class MemoryPairs extends TranshipmentPairStorage {
       }
     }
     return pruned;
+  }
+
+  async countByStatus(): Promise<
+    Readonly<Partial<Record<TranshipmentPairStatus, number>>>
+  > {
+    await Promise.resolve();
+    const counts: Partial<Record<TranshipmentPairStatus, number>> = {};
+    for (const pair of this.pairs.values())
+      counts[pair.status] = (counts[pair.status] ?? 0) + 1;
+    return counts;
   }
 
   /** The stored pair (tests). */

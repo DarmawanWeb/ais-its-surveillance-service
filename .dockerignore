@@ -10,4 +10,5 @@
 !tsconfig.build.json
 !src/
 !migrations/
+!seeds/
 src/**/*.spec.ts

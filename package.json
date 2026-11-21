@@ -21,6 +21,7 @@
     "start": "node --enable-source-maps dist/main.js",
     "start:prod": "NODE_ENV=production node --enable-source-maps dist/main.js",
     "migrate": "node --enable-source-maps dist/migrate.js",
+    "seed": "node --enable-source-maps dist/seed.js",
     "openapi": "pnpm run build && node --enable-source-maps dist/openapi.js",
     "openapi:check": "node --enable-source-maps dist/openapi.js --check",
     "test": "vitest run",

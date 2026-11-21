@@ -1,4 +1,5 @@
 import { DetectorTestHarness } from '@darmawanweb/ais-its-nest/analytics';
+import { MetricsService } from '@darmawanweb/ais-its-nest/metrics';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -8,6 +9,7 @@ import {
 } from '../shared/__testing__/memory-storage.js';
 import { VesselStateRecorder } from '../shared/vessel-state.recorder.js';
 import { TranshipmentDetector } from './transhipment.detector.js';
+import { TranshipmentMetrics } from './transhipment.metrics.js';
 
 const START = new Date('2026-03-01T00:00:00.000Z');
 const A = 525000101;
@@ -21,12 +23,21 @@ function setup(env: Record<string, string> = {}) {
   const tracks = new MemoryTracks();
   const pairs = new MemoryPairs();
   const recorder = new VesselStateRecorder(states, { writeIntervalMs: 60_000 });
+  const metrics = new MetricsService();
   const harness = DetectorTestHarness.create({
-    detectors: [new TranshipmentDetector(recorder, states, tracks, pairs)],
+    detectors: [
+      new TranshipmentDetector(
+        recorder,
+        states,
+        tracks,
+        pairs,
+        new TranshipmentMetrics(metrics),
+      ),
+    ],
     env,
     now: START,
   });
-  return { harness, states, tracks, pairs };
+  return { harness, states, tracks, pairs, metrics };
 }
 
 /** Two vessels drifting side by side (≈ 20 m apart), one fix per minute each. */
@@ -68,7 +79,7 @@ async function sideBySide(
 
 describe('TranshipmentDetector', () => {
   it('accumulates candidate priorities and raises an event from the analysis', async () => {
-    const { harness, pairs, tracks } = setup();
+    const { harness, pairs, tracks, metrics } = setup();
     await sideBySide(harness, 60);
 
     const pair = pairs.get(A, B);
@@ -104,6 +115,16 @@ describe('TranshipmentDetector', () => {
       priority: 0,
       analyses: 1,
     });
+    const exposition = await metrics.render();
+    expect(exposition).toContain(
+      'aisits_surveillance_transhipment_observations_total 121',
+    );
+    expect(exposition).toContain(
+      'aisits_surveillance_transhipment_analyses_total{outcome="illegal"} 1',
+    );
+    expect(exposition).toContain(
+      'aisits_surveillance_transhipment_pairs{status="completed"} 1',
+    );
     expect(harness.logs.filter((line) => line.startsWith('error'))).toEqual([]);
   });
 
