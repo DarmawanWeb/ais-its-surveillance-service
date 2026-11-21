@@ -1,0 +1,1564 @@
+{
+  "openapi": "3.0.0",
+  "paths": {
+    "/api/v2/surveillance/methodology": {
+      "get": {
+        "operationId": "MethodologyController_describe",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MethodologyDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Methods implemented by this service, with their sources",
+        "tags": [
+          "methodology"
+        ]
+      }
+    },
+    "/api/v2/surveillance/detectors": {
+      "get": {
+        "operationId": "DetectorsController_list",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "The detectors of this service with their method ids and active thresholds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DetectorDescriptionDto"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Detectors of this instance: method ids and active thresholds",
+        "tags": [
+          "detectors"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      }
+    },
+    "/api/v2/surveillance/events": {
+      "get": {
+        "operationId": "EventsController_list",
+        "parameters": [
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Opaque cursor from `page.nextCursor` of the previous page",
+            "schema": {
+              "maxLength": 1024,
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "description": "Start (ISO-8601); default: endpoint specific",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "description": "End (ISO-8601); default: now",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "bbox",
+            "required": false,
+            "in": "query",
+            "description": "minLon,minLat,maxLon,maxLat (WGS 84 degrees)",
+            "schema": {
+              "example": "95,-11,141,6",
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "required": false,
+            "in": "query",
+            "description": "Alert type, e.g. transhipment, anomaly, dark, geofence, fishing",
+            "schema": {
+              "example": "transhipment",
+              "type": "string"
+            }
+          },
+          {
+            "name": "severity",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "info",
+                "warning",
+                "critical"
+              ]
+            }
+          },
+          {
+            "name": "status",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "open",
+                "confirmed",
+                "dismissed",
+                "resolved"
+              ]
+            }
+          },
+          {
+            "name": "mmsi",
+            "required": false,
+            "in": "query",
+            "description": "Vessel (matches mmsi or relatedMmsi)",
+            "schema": {
+              "example": 525005223,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the time-ordered list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "page"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/SurveillanceEventDto"
+                      }
+                    },
+                    "page": {
+                      "$ref": "#/components/schemas/CursorPageInfoDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Surveillance events, newest first (tenancy: own vessels unless authority)",
+        "tags": [
+          "events"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      }
+    },
+    "/api/v2/surveillance/events/{id}": {
+      "get": {
+        "operationId": "EventsController_get",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurveillanceEventDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "One surveillance event",
+        "tags": [
+          "events"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      },
+      "patch": {
+        "operationId": "EventsController_review",
+        "parameters": [
+          {
+            "name": "id",
+            "required": true,
+            "in": "path",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewEventDto"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurveillanceEventDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Review an event: confirm, dismiss or reopen it, with a note",
+        "tags": [
+          "events"
+        ],
+        "x-required-permissions": [
+          "surveillance:review"
+        ]
+      }
+    },
+    "/api/v2/surveillance/transhipments": {
+      "get": {
+        "operationId": "TranshipmentsController_list",
+        "parameters": [
+          {
+            "name": "cursor",
+            "required": false,
+            "in": "query",
+            "description": "Opaque cursor from `page.nextCursor` of the previous page",
+            "schema": {
+              "maxLength": 1024,
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "description": "Start (ISO-8601); default: endpoint specific",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "description": "End (ISO-8601); default: now",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "mmsi",
+            "required": false,
+            "in": "query",
+            "description": "Only pairs with this vessel (legacy GET /results/:mmsi)",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the time-ordered list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "page"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TranshipmentResultDto"
+                      }
+                    },
+                    "page": {
+                      "$ref": "#/components/schemas/CursorPageInfoDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Detected transhipments in the legacy result shape (accuracy, window, priority distribution)",
+        "tags": [
+          "transhipments"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      }
+    },
+    "/api/v2/surveillance/heatmap": {
+      "get": {
+        "operationId": "StatisticsController_heatmap",
+        "parameters": [
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "description": "Start (ISO-8601); default: endpoint specific",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "description": "End (ISO-8601); default: now",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "bbox",
+            "required": false,
+            "in": "query",
+            "description": "minLon,minLat,maxLon,maxLat (WGS 84 degrees)",
+            "schema": {
+              "example": "95,-11,141,6",
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "required": false,
+            "in": "query",
+            "description": "Alert type (default: every type)",
+            "schema": {
+              "example": "fishing",
+              "type": "string"
+            }
+          },
+          {
+            "name": "cellKm",
+            "required": false,
+            "in": "query",
+            "description": "Cell size, kilometres (converted to degrees at 111.32 km/°)",
+            "schema": {
+              "minimum": 0.5,
+              "maximum": 500,
+              "default": 10,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HeatmapDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Event counts per grid cell (ST_SnapToGrid, cell size in km)",
+        "tags": [
+          "statistics"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      }
+    },
+    "/api/v2/surveillance/stats": {
+      "get": {
+        "operationId": "StatisticsController_stats",
+        "parameters": [
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "description": "Start (ISO-8601); default: endpoint specific",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "description": "End (ISO-8601); default: now",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurveillanceStatsDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Event counts by type, severity and status in a time range",
+        "tags": [
+          "statistics"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      }
+    },
+    "/api/v2/surveillance/fishing-violations": {
+      "get": {
+        "operationId": "FishingViolationsController_list",
+        "parameters": [
+          {
+            "name": "page",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "default": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pageSize",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "bbox",
+            "required": false,
+            "in": "query",
+            "description": "minLon,minLat,maxLon,maxLat (WGS 84 degrees)",
+            "schema": {
+              "example": "95,-11,141,6",
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "required": false,
+            "in": "query",
+            "schema": {
+              "example": 2016,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "meta"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/FishingViolationDto"
+                      }
+                    },
+                    "meta": {
+                      "$ref": "#/components/schemas/PageMetaDto"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Historical illegal-fishing apprehensions 2015–2017 (legacy dataset, map layer)",
+        "tags": [
+          "fishing-violations"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      }
+    }
+  },
+  "info": {
+    "title": "AIS Maritime Intelligence — AIS ITS Surveillance Service",
+    "description": "Illegal-activity analytics on the Detector SDK: illegal transhipment, navstatus anomaly, dark vessels, geofence violations and fishing loitering",
+    "version": "0.1.0",
+    "contact": {}
+  },
+  "tags": [
+    {
+      "name": "events",
+      "description": "Surveillance events of the detectors and their review"
+    },
+    {
+      "name": "transhipments",
+      "description": "Detected transhipments (legacy result shape)"
+    },
+    {
+      "name": "statistics",
+      "description": "Heatmap and counts of the events"
+    },
+    {
+      "name": "fishing-violations",
+      "description": "Historical illegal-fishing records (map layer)"
+    },
+    {
+      "name": "detectors",
+      "description": "Detectors of the Detector SDK"
+    },
+    {
+      "name": "methodology",
+      "description": "Methods of the methodology catalog implemented here"
+    }
+  ],
+  "servers": [],
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "type": "http",
+        "description": "Access token (EdDSA JWT)"
+      },
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "API key sk_<id>_<secret>"
+      },
+      "internalToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Internal-Token",
+        "description": "Service-to-service token"
+      }
+    },
+    "schemas": {
+      "LocalizedTextDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Bahasa Indonesia"
+          },
+          "en": {
+            "type": "string",
+            "description": "English"
+          }
+        },
+        "required": [
+          "id",
+          "en"
+        ]
+      },
+      "MethodReferenceDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "imo-mepc-352-78"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "nullable": true,
+            "format": "uri"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "url"
+        ]
+      },
+      "MethodSummaryDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "cii.attained"
+          },
+          "catalogued": {
+            "type": "boolean",
+            "description": "Whether the catalog shipped with @darmawanweb/ais-its-contracts describes the method"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "ais",
+              "emission",
+              "seemp",
+              "telemetry",
+              "geo",
+              "safety",
+              "surveillance"
+            ],
+            "nullable": true
+          },
+          "name": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LocalizedTextDto"
+              }
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "implemented",
+              "planned",
+              "deprecated"
+            ],
+            "nullable": true
+          },
+          "needsCitation": {
+            "type": "boolean",
+            "description": "Values come from the thesis without a verified external source"
+          },
+          "references": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MethodReferenceDto"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "catalogued",
+          "domain",
+          "name",
+          "status",
+          "needsCitation",
+          "references"
+        ]
+      },
+      "MethodologyDto": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string",
+            "example": "surveillance"
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MethodSummaryDto"
+            }
+          }
+        },
+        "required": [
+          "service",
+          "methods"
+        ]
+      },
+      "DetectorDescriptionDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "ews",
+            "description": "Detector id (`DETECTORS` entry)"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "safety",
+              "surveillance"
+            ]
+          },
+          "methodIds": {
+            "example": [
+              "ews.pipeline_distance_status"
+            ],
+            "description": "Methodology catalog ids (spec §17)",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "alertTypes": {
+            "nullable": true,
+            "example": [
+              "ews"
+            ],
+            "description": "Alert types the detector raises; null when undeclared",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Enabled by `DETECTORS` in this instance"
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true,
+            "nullable": true,
+            "example": {
+              "DANGER_M": 500,
+              "WARNING_M": 1750
+            },
+            "description": "Active `<ID>_*` configuration (thresholds); null when disabled"
+          },
+          "tickIntervalMs": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Tick interval of `onTick`, ms; null without ticks"
+          }
+        },
+        "required": [
+          "id",
+          "domain",
+          "methodIds",
+          "alertTypes",
+          "enabled",
+          "config",
+          "tickIntervalMs"
+        ]
+      },
+      "SurveillanceEventDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Event id = alert id"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it happened"
+          },
+          "detector": {
+            "type": "string",
+            "example": "transhipment"
+          },
+          "type": {
+            "type": "string",
+            "example": "transhipment"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "safety",
+              "surveillance"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Published severity"
+          },
+          "currentSeverity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Current severity of the occurrence"
+          },
+          "mmsi": {
+            "type": "integer",
+            "example": 525005223
+          },
+          "relatedMmsi": {
+            "type": "integer",
+            "nullable": true
+          },
+          "vesselName": {
+            "type": "object",
+            "nullable": true,
+            "description": "Vessel name from the fleet projection"
+          },
+          "relatedVesselName": {
+            "type": "object",
+            "nullable": true
+          },
+          "zoneId": {
+            "type": "object",
+            "format": "uuid",
+            "nullable": true
+          },
+          "zoneName": {
+            "type": "object",
+            "nullable": true,
+            "description": "Zone name from the GEO projection"
+          },
+          "lat": {
+            "type": "object",
+            "nullable": true
+          },
+          "lon": {
+            "type": "object",
+            "nullable": true
+          },
+          "title": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "methodId": {
+            "type": "string",
+            "example": "transhipment.accuracy",
+            "description": "Methodology catalog id (spec §17)"
+          },
+          "dedupKey": {
+            "type": "string",
+            "example": "transhipment:525000001:525000002"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "confirmed",
+              "dismissed",
+              "resolved"
+            ]
+          },
+          "openedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "resolvedAt": {
+            "type": "object",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the detector ended the occurrence"
+          },
+          "resolution": {
+            "type": "object",
+            "additionalProperties": true,
+            "nullable": true
+          },
+          "reviewedBy": {
+            "type": "object",
+            "format": "uuid",
+            "nullable": true
+          },
+          "reviewedAt": {
+            "type": "object",
+            "format": "date-time",
+            "nullable": true
+          },
+          "note": {
+            "type": "object",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the event was recorded"
+          }
+        },
+        "required": [
+          "id",
+          "time",
+          "detector",
+          "type",
+          "domain",
+          "severity",
+          "currentSeverity",
+          "mmsi",
+          "relatedMmsi",
+          "vesselName",
+          "relatedVesselName",
+          "zoneId",
+          "zoneName",
+          "lat",
+          "lon",
+          "title",
+          "message",
+          "methodId",
+          "dedupKey",
+          "data",
+          "status",
+          "openedAt",
+          "lastSeenAt",
+          "resolvedAt",
+          "resolution",
+          "reviewedBy",
+          "reviewedAt",
+          "note",
+          "createdAt"
+        ]
+      },
+      "CursorPageInfoDto": {
+        "type": "object",
+        "properties": {
+          "nextCursor": {
+            "type": "string",
+            "nullable": true,
+            "description": "Opaque cursor of the next page; null on the last page"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
+          }
+        },
+        "required": [
+          "nextCursor",
+          "limit"
+        ]
+      },
+      "ReviewEventDto": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "confirmed",
+              "dismissed"
+            ],
+            "description": "Review verdict; `open` withdraws a verdict (`resolved` when the detector already ended the occurrence)"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "nullable": true
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "PriorityDistributionDto": {
+        "type": "object",
+        "properties": {
+          "low": {
+            "type": "number",
+            "description": "P < 6, percent"
+          },
+          "medium": {
+            "type": "number",
+            "description": "6 ≤ P < 18, percent"
+          },
+          "high": {
+            "type": "number",
+            "description": "P ≥ 18, percent"
+          }
+        },
+        "required": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "TranshipmentResultDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Event id"
+          },
+          "ship1MMSI": {
+            "type": "integer",
+            "description": "Smaller MMSI of the pair"
+          },
+          "ship2MMSI": {
+            "type": "integer",
+            "description": "Larger MMSI of the pair"
+          },
+          "ship1Name": {
+            "type": "object",
+            "nullable": true
+          },
+          "ship2Name": {
+            "type": "object",
+            "nullable": true
+          },
+          "isIllegal": {
+            "type": "boolean",
+            "description": "Always true: only positive analyses are events"
+          },
+          "startTimestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endTimestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "accuracy": {
+            "type": "number",
+            "description": "Score 0–100 (transhipment.accuracy)"
+          },
+          "averagePriority": {
+            "type": "number",
+            "description": "Mean product priority of the positive checks"
+          },
+          "priorityDistribution": {
+            "$ref": "#/components/schemas/PriorityDistributionDto"
+          },
+          "detectedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the analysis detected it"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "confirmed",
+              "dismissed",
+              "resolved"
+            ]
+          },
+          "lat": {
+            "type": "object",
+            "nullable": true
+          },
+          "lon": {
+            "type": "object",
+            "nullable": true
+          },
+          "methodId": {
+            "type": "string",
+            "example": "transhipment.accuracy"
+          }
+        },
+        "required": [
+          "id",
+          "ship1MMSI",
+          "ship2MMSI",
+          "ship1Name",
+          "ship2Name",
+          "isIllegal",
+          "startTimestamp",
+          "endTimestamp",
+          "accuracy",
+          "averagePriority",
+          "priorityDistribution",
+          "detectedAt",
+          "severity",
+          "status",
+          "lat",
+          "lon",
+          "methodId"
+        ]
+      },
+      "HeatmapCellDto": {
+        "type": "object",
+        "properties": {
+          "lat": {
+            "type": "number",
+            "description": "Latitude of the cell centre, degrees"
+          },
+          "lon": {
+            "type": "number",
+            "description": "Longitude of the cell centre, degrees"
+          },
+          "count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "lat",
+          "lon",
+          "count"
+        ]
+      },
+      "HeatmapDto": {
+        "type": "object",
+        "properties": {
+          "cells": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HeatmapCellDto"
+            }
+          },
+          "cellKm": {
+            "type": "number",
+            "description": "Cell size, kilometres"
+          },
+          "cellDeg": {
+            "type": "number",
+            "description": "Cell size, degrees (ST_SnapToGrid)"
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "total": {
+            "type": "integer",
+            "description": "Events counted"
+          }
+        },
+        "required": [
+          "cells",
+          "cellKm",
+          "cellDeg",
+          "from",
+          "to",
+          "total"
+        ]
+      },
+      "TranshipmentQueueStatsDto": {
+        "type": "object",
+        "properties": {
+          "pending": {
+            "type": "integer"
+          },
+          "inProgress": {
+            "type": "integer"
+          },
+          "completed": {
+            "type": "integer"
+          },
+          "failed": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pending",
+          "inProgress",
+          "completed",
+          "failed"
+        ]
+      },
+      "SurveillanceStatsDto": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "total": {
+            "type": "integer",
+            "description": "Events in the range"
+          },
+          "active": {
+            "type": "integer",
+            "description": "Occurrences the detectors have not ended"
+          },
+          "byType": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "example": {
+              "transhipment": 2,
+              "dark": 5
+            }
+          },
+          "bySeverity": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "example": {
+              "warning": 4,
+              "critical": 1
+            }
+          },
+          "byStatus": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "example": {
+              "open": 3,
+              "confirmed": 1
+            }
+          },
+          "transhipmentQueue": {
+            "nullable": true,
+            "description": "Candidate queue (authority users only, else null)",
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TranshipmentQueueStatsDto"
+              }
+            ]
+          },
+          "fishingViolations": {
+            "type": "integer",
+            "description": "Historical fishing violation records"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "total",
+          "active",
+          "byType",
+          "bySeverity",
+          "byStatus",
+          "transhipmentQueue",
+          "fishingViolations"
+        ]
+      },
+      "FishingViolationDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "vesselName": {
+            "type": "string",
+            "example": "KM. Mandiri 777"
+          },
+          "flagCountry": {
+            "type": "string",
+            "example": "Indonesia",
+            "description": "Flag country as recorded"
+          },
+          "year": {
+            "type": "integer",
+            "example": 2015
+          },
+          "violation": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "description": "Follow-up action"
+          },
+          "lat": {
+            "type": "number",
+            "description": "Apprehension point latitude, degrees"
+          },
+          "lon": {
+            "type": "number",
+            "description": "Apprehension point longitude, degrees"
+          },
+          "source": {
+            "type": "string",
+            "description": "Provenance of the record"
+          },
+          "sourceNote": {
+            "type": "string",
+            "description": "Provenance note and caveats"
+          },
+          "methodId": {
+            "type": "string",
+            "example": "fishing.apprehensions_2015_2017"
+          }
+        },
+        "required": [
+          "id",
+          "vesselName",
+          "flagCountry",
+          "year",
+          "violation",
+          "action",
+          "lat",
+          "lon",
+          "source",
+          "sourceNote",
+          "methodId"
+        ]
+      },
+      "PageMetaDto": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "pageSize": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of items across all pages"
+          }
+        },
+        "required": [
+          "page",
+          "pageSize",
+          "total"
+        ]
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Problem type URI"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 599
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "description": "Request path",
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$",
+            "description": "Stable UPPER_SNAKE_CASE error code"
+          },
+          "traceId": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "description": "Dot separated path, e.g. \"positions.0.lat\""
+                },
+                "message": {
+                  "type": "string"
+                },
+                "code": {
+                  "description": "Machine readable reason",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field",
+                "message"
+              ],
+              "additionalProperties": false,
+              "description": "Field-level validation error"
+            }
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status",
+          "code"
+        ],
+        "additionalProperties": {},
+        "description": "RFC 9457 problem details"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    }
+  ]
+}
