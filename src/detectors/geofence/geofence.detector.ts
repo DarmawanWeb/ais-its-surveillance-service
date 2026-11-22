@@ -13,6 +13,7 @@ import {
   geofenceTransition,
   isWatchedZone,
 } from '../../domain/geofence.js';
+import { AlertCoordinator } from '../shared/alert-coordinator.js';
 import {
   optionalZoneKindList,
   zoneKindList,
@@ -64,20 +65,24 @@ export class GeofenceDetector implements Detector<GeofenceConfig> {
   readonly alertTypes = [GEOFENCE_ALERT] as const;
   readonly configSchema = geofenceConfigSchema;
 
-  constructor(private readonly recorder: VesselStateRecorder) {}
+  constructor(
+    private readonly recorder: VesselStateRecorder,
+    private readonly coordinator: AlertCoordinator,
+  ) {}
 
   async onPosition(
     context: DetectorContext<GeofenceConfig>,
     position: VesselPosition,
   ): Promise<void> {
     const { config } = context;
-    await this.recorder.observe(context.zones, position);
-    const orgId = context.fleet.orgOf(position.mmsi) ?? null;
+    await this.coordinator.positionSeen(context.now());
+    await this.recorder.observe(context, position);
     const inside = context.zones
       .zonesAt(position, {
         kinds: config.KINDS,
         useBuffer: config.USE_BUFFER,
-        orgId,
+        // Global zones and the vessel's own organization's zones (spec §8.5).
+        orgId: context.fleet.orgOf(position.mmsi) ?? null,
       })
       .filter((zone) => isWatchedZone(zone, config.KINDS));
 
@@ -99,9 +104,7 @@ export class GeofenceDetector implements Detector<GeofenceConfig> {
           zoneKind: zone.kind,
           zoneCode: zone.code,
           zoneName: zone.name,
-          zoneOrgId: zone.orgId,
           sogKn: position.sog,
-          orgId,
         },
       });
     }

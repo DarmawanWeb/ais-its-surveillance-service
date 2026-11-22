@@ -25,7 +25,8 @@ export class ListTranshipmentsQueryDto extends IntersectionType(
 ) {
   @ApiPropertyOptional({
     type: 'integer',
-    description: 'Only pairs with this vessel (legacy GET /results/:mmsi)',
+    description:
+      'Only pairs with this vessel (legacy GET /results/:mmsi); `from` / `to` select by window start',
   })
   @IsOptional()
   @Type(() => Number)
@@ -48,14 +49,23 @@ export class PriorityDistributionDto {
 }
 
 /**
- * A detected transhipment in the legacy result shape
+ * One positive analysis in the legacy result shape
  * (`IllegalTranshipmentResult`: ship1MMSI/ship2MMSI sorted, isIllegal,
  * startTimestamp, endTimestamp, accuracy, averagePriority,
- * priorityDistribution, detectedAt) plus the v2 event fields.
+ * priorityDistribution, detectedAt) plus the v2 fields of its occurrence.
  */
 export class TranshipmentResultDto {
-  @ApiProperty({ format: 'uuid', description: 'Event id' })
+  @ApiProperty({
+    format: 'uuid',
+    description: 'Result id (one per positive analysis)',
+  })
   readonly id!: string;
+
+  @ApiProperty({
+    format: 'uuid',
+    description: 'Event of the occurrence (`GET /surveillance/events/:id`)',
+  })
+  readonly eventId!: string;
 
   @ApiProperty({ type: 'integer', description: 'Smaller MMSI of the pair' })
   readonly ship1MMSI!: number;
@@ -70,7 +80,7 @@ export class TranshipmentResultDto {
   readonly ship2Name!: string | null;
 
   @ApiProperty({
-    description: 'Always true: only positive analyses are events',
+    description: 'Always true: only positive analyses are stored',
   })
   readonly isIllegal!: boolean;
 
@@ -95,13 +105,25 @@ export class TranshipmentResultDto {
   })
   readonly detectedAt!: string;
 
-  @ApiProperty({ enum: ALERT_SEVERITIES })
+  @ApiProperty({
+    enum: ALERT_SEVERITIES,
+    description:
+      'Severity of this analysis (critical from TRANSHIPMENT_CRITICAL_ACCURACY)',
+  })
   readonly severity!: AlertSeverity;
 
-  @ApiProperty({ enum: SURVEILLANCE_EVENT_STATUSES })
-  readonly status!: SurveillanceEventStatus;
+  @ApiProperty({
+    enum: SURVEILLANCE_EVENT_STATUSES,
+    nullable: true,
+    description:
+      'Review status of the occurrence (`null` once its event expired)',
+  })
+  readonly status!: SurveillanceEventStatus | null;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({
+    nullable: true,
+    description: 'Midpoint of the two vessels in the middle of the window',
+  })
   readonly lat!: number | null;
 
   @ApiProperty({ nullable: true })

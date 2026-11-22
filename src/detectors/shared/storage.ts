@@ -22,7 +22,16 @@ export interface StoredVesselState {
   /** Reported AIS navigational status (0–15). */
   readonly navstatus: VesselPosition['navstatus'];
   readonly predictedNavstatus: PredictedNavStatus;
+  /** Active zones containing the position that are visible to the vessel's organization. */
   readonly inZoneIds: readonly string[];
+}
+
+/** A vessel's persisted navstatus-anomaly streak. */
+export interface AnomalyStreak {
+  /** Consecutive anomalous positions (at most `ANOMALY_MIN_POSITIONS`). */
+  readonly streak: number;
+  /** Event time of the last position the streak counted. */
+  readonly at: Date;
 }
 
 /** A stored neighbour of the candidate search with its distance. */
@@ -65,8 +74,10 @@ export interface SilentVesselsQuery {
 export abstract class VesselStateStorage {
   /**
    * Stores the vessel's latest position (ignored when the stored one is
-   * newer) and the zones containing it; `anomalyStreak` also updates the
-   * anomaly counter (otherwise it is kept).
+   * newer) and the zones containing it; `anomalyStreak` also stores the
+   * anomaly counter with the position's time as the time of its last
+   * counted position — unless that time is not newer than the stored one
+   * (a redelivered position never counts twice). Otherwise the counter is kept.
    */
   abstract save(
     position: VesselPosition,
@@ -74,8 +85,12 @@ export abstract class VesselStateStorage {
     patch?: { readonly anomalyStreak?: number },
   ): Promise<void>;
 
-  /** Vessels with a non-zero anomaly streak (restored at startup). */
-  abstract anomalyStreaks(): Promise<ReadonlyMap<number, number>>;
+  /**
+   * Persisted anomaly streaks to restore at startup: every non-zero streak,
+   * and the zero streaks counted within the hour before the newest counted
+   * position (their time keeps redelivered older positions from counting).
+   */
+  abstract anomalyStreaks(): Promise<ReadonlyMap<number, AnomalyStreak>>;
 
   /** Candidate neighbours within a radius and a time range (`ST_DWithin`). */
   abstract neighbours(query: StoredNeighbourQuery): Promise<StoredNeighbour[]>;

@@ -1,9 +1,12 @@
 import type {
+  DetectorContext,
   VesselPosition,
-  ZoneIndex,
 } from '@darmawanweb/ais-its-nest/analytics';
 
 import type { VesselStateStorage } from './storage.js';
+
+/** What the recorder reads from a detector context: the zone index and the fleet (tenancy). */
+export type RecorderContext = Pick<DetectorContext, 'zones' | 'fleet'>;
 
 /** Options of {@link VesselStateRecorder}. */
 export interface VesselStateRecorderOptions {
@@ -18,7 +21,9 @@ const TRIM_WINDOW_MS = 60 * 60_000;
 
 /**
  * Writes the vessels' latest state to `vessel_state` (latest position, zones
- * containing it) at most once per `writeIntervalMs` of event time per vessel,
+ * containing it that the vessel's organization may use: global zones and its
+ * own — never another tenant's private zones, spec §8.5) at most once per
+ * `writeIntervalMs` of event time per vessel,
  * or on every position when forced (transhipment candidates, whose stored
  * state feeds the `ST_DWithin` candidate search). Every detector calls it for
  * the positions it sees; the calls of one position share a single write
@@ -38,7 +43,7 @@ export class VesselStateRecorder {
 
   /** Records `position` unless the vessel was written recently (event time). */
   async observe(
-    zones: ZoneIndex,
+    context: RecorderContext,
     position: VesselPosition,
     options: { readonly force?: boolean } = {},
   ): Promise<void> {
@@ -50,23 +55,28 @@ export class VesselStateRecorder {
         return;
     }
     this.remember(position.mmsi, time);
-    await this.storage.save(position, this.zoneIdsAt(zones, position));
+    await this.storage.save(position, this.zoneIdsAt(context, position));
   }
 
-  /** Records `position` with a new anomaly streak (always written). */
+  /** Records `position` with a new anomaly streak counted at its time (always written). */
   async saveAnomalyStreak(
-    zones: ZoneIndex,
+    context: RecorderContext,
     position: VesselPosition,
     streak: number,
   ): Promise<void> {
     this.remember(position.mmsi, position.time.getTime());
-    await this.storage.save(position, this.zoneIdsAt(zones, position), {
+    await this.storage.save(position, this.zoneIdsAt(context, position), {
       anomalyStreak: streak,
     });
   }
 
-  private zoneIdsAt(zones: ZoneIndex, position: VesselPosition): string[] {
-    return zones.zonesAt(position).map((zone) => zone.id);
+  private zoneIdsAt(
+    context: RecorderContext,
+    position: VesselPosition,
+  ): string[] {
+    return context.zones
+      .zonesAt(position, { orgId: context.fleet.orgOf(position.mmsi) ?? null })
+      .map((zone) => zone.id);
   }
 
   private remember(mmsi: number, time: number): void {

@@ -2,6 +2,7 @@ import type { ZoneSnapshotV1 } from '@darmawanweb/ais-its-contracts/events';
 import { DetectorTestHarness } from '@darmawanweb/ais-its-nest/analytics';
 import { describe, expect, it } from 'vitest';
 
+import { LocalAlertCoordinator } from '../shared/__testing__/local-alert-coordinator.js';
 import { MemoryVesselStates } from '../shared/__testing__/memory-storage.js';
 import { VesselStateRecorder } from '../shared/vessel-state.recorder.js';
 import { GeofenceDetector, geofenceKey } from './geofence.detector.js';
@@ -28,7 +29,7 @@ function setup(env: Record<string, string> = {}) {
     writeIntervalMs: 60_000,
   });
   return DetectorTestHarness.create({
-    detectors: [new GeofenceDetector(recorder)],
+    detectors: [new GeofenceDetector(recorder, new LocalAlertCoordinator())],
     env,
     now: START,
   });

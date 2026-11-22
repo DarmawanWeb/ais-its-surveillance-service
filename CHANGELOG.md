@@ -6,6 +6,49 @@ All notable changes to `ais-its-surveillance-service` are documented in this fil
 
 ## [Unreleased]
 
+### Added
+
+- `transhipment_results` (migration `0002_review_hardening`, hypertable on the window start,
+  2-year retention): every positive analysis is stored with its window, accuracy, average
+  priority, distribution, severity and position, linked to the event of its occurrence, in the
+  same transaction as the completion of its claim (legacy parity: the child worker stored a result
+  per analysis).
+- `AlertCoordinator` (platform workaround, see the README): the first position an instance handles
+  after a pause reloads the open occurrences from `events` (a takeover adopts what the previous
+  active instance opened and drops what it ended); the dark scan and the transhipment analyser run
+  only on the instance consuming positions, and their raises / resolutions are serialized per
+  `dedupKey` across replicas with a PostgreSQL advisory lock after aligning the key with `events`.
+
+### Changed
+
+- `GET /surveillance/transhipments` lists the stored results (one per positive analysis, newest
+  window first) instead of one stale entry per occurrence; `id` is the result id, the new
+  `eventId` links the occurrence, `status` (the occurrence's review status) is nullable.
+- `PATCH /surveillance/events/:id` changes the note only when the body has `note` (`null` clears
+  it); the audit record carries `noteChanged`, and the previous and new note when it changed.
+- Event and alert `data` no longer carry organization ids (`orgId`, `relatedOrgId`,
+  `zoneOrgId`): ownership is derived at query time from the FLEET projection (spec §8.5).
+- The anomaly streak is capped at `ANOMALY_MIN_POSITIONS`, so a persistently anomalous vessel no
+  longer rewrites `vessel_state` on every position.
+
+### Fixed
+
+- Tenancy (spec §8.5): the dark rule counts only global (curated) `port` / `anchorage` zones, so
+  an organization's private zone can no longer silence it; `vessel_state.in_zone_ids` holds only
+  global and own-organization zones, and the transhipment cold-start search applies the in-memory
+  candidate rule (zones of the neighbour's own organization) to stored neighbours.
+- Hot standbys no longer run the transhipment analyser, which raised a second occurrence (second
+  `alert.raised.v1`) for pairs opened by the active instance and left them open after a negative
+  analysis.
+- Redelivered positions after a restart are counted once (spec §7.1): the anomaly streak stores
+  the time of its last counted position (`vessel_state.anomaly_streak_at`), and the pair
+  accumulation the last observation of each vessel (`last_seen_by_a_at` / `last_seen_by_b_at`).
+- Pending transhipment pairs below `TRANSHIPMENT_MIN_PRIORITY` no longer accumulate brief
+  encounters days apart (an accumulation not continued within `TRANSHIPMENT_ROUTE_WINDOW_MIN`
+  starts over) and are pruned with the finished ones after the 7-day track retention.
+- A claim released as stale and claimed again can no longer be completed, failed or released by
+  its previous holder.
+
 ## [0.1.0] - 2026-11-21
 
 ### Added

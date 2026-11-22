@@ -9,6 +9,8 @@ import { DetectorEventsRepository } from './detector-events.repository.js';
 import { DetectorsController } from './detectors.controller.js';
 import { FishingDetector } from './fishing/fishing.detector.js';
 import { GeofenceDetector } from './geofence/geofence.detector.js';
+import { AlertCoordinator } from './shared/alert-coordinator.js';
+import { PostgresAlertCoordinator } from './shared/postgres-alert-coordinator.js';
 import { TrackStorage, VesselStateStorage } from './shared/storage.js';
 import { TrackPointsRepository } from './shared/track-points.repository.js';
 import { VesselStateRecorder } from './shared/vessel-state.recorder.js';
@@ -28,9 +30,12 @@ const PAIR_SEARCH_MAX_AGE_MS = 30 * 60_000;
  * Detector SDK wiring (spec §18). The runner consumes `AIS_POSITION`
  * (durable `surveillance-positions`), keeps the `GEO` and `FLEET` snapshots
  * in memory, runs the detectors enabled by `DETECTORS` and publishes their
- * alerts to `ALERTS` after `DetectorEventsRepository` stored them. Add a
- * detector: a folder under `src/detectors/`, its class in `providers`, its
- * method ids in the catalog and its `<ID>_*` variables in `.env.example`.
+ * alerts to `ALERTS` after `DetectorEventsRepository` stored them; the
+ * `AlertCoordinator` keeps the in-memory alert state of replicas consistent
+ * with the `events` table. Add a detector: a folder under `src/detectors/`,
+ * its class in `providers` (calling `AlertCoordinator.positionSeen` first in
+ * `onPosition`), its method ids in the catalog and its `<ID>_*` variables in
+ * `.env.example`.
  */
 @Module({
   imports: [
@@ -47,6 +52,8 @@ const PAIR_SEARCH_MAX_AGE_MS = 30 * 60_000;
   ],
   controllers: [DetectorsController],
   providers: [
+    DetectorEventsRepository,
+    { provide: AlertCoordinator, useClass: PostgresAlertCoordinator },
     { provide: VesselStateStorage, useClass: VesselStateRepository },
     { provide: TrackStorage, useClass: TrackPointsRepository },
     { provide: TranshipmentPairStorage, useClass: TranshipmentPairsRepository },

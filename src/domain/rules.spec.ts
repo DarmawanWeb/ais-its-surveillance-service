@@ -55,11 +55,22 @@ describe('anomaly.navstatus_mismatch', () => {
   it('counts consecutive anomalies and resets on a consistent position', () => {
     let streak = 0;
     for (const anomalous of [true, true, false, true, true, true]) {
-      streak = nextAnomalyStreak(streak, anomalous);
+      streak = nextAnomalyStreak(streak, anomalous, 3);
     }
     expect(streak).toBe(3);
     expect(isSustainedAnomaly(streak, 3)).toBe(true);
     expect(isSustainedAnomaly(2, 3)).toBe(false);
+  });
+
+  it('caps the streak once the anomaly is sustained (no change, no write)', () => {
+    let streak = 0;
+    const seen: number[] = [];
+    for (let position = 0; position < 6; position++) {
+      streak = nextAnomalyStreak(streak, true, 3);
+      seen.push(streak);
+    }
+    expect(seen).toEqual([1, 2, 3, 3, 3, 3]);
+    expect(nextAnomalyStreak(3, false, 3)).toBe(0);
   });
 });
 
@@ -227,6 +238,7 @@ describe('transhipment.candidate_queue', () => {
       {
         mmsiA: 525000001,
         mmsiB: 525000009,
+        observer: 525000009,
         priority: 27,
         distanceM: 11,
         seenAt: at(0),

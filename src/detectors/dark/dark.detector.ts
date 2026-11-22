@@ -14,6 +14,7 @@ import {
   isDarkVessel,
   minutesBetween,
 } from '../../domain/dark.js';
+import { AlertCoordinator } from '../shared/alert-coordinator.js';
 import {
   boundedInteger,
   positiveNumber,
@@ -36,7 +37,7 @@ export const darkConfigSchema = z.object({
   MIN_SOG_KN: z.coerce.number().min(0).default(1),
   /** The last position must be farther than this from a harbour zone, kilometres. */
   HARBOUR_DISTANCE_KM: positiveNumber(5),
-  /** Zone kinds counted as harbours. */
+  /** Zone kinds counted as harbours (global zones only, never org-owned ones). */
   HARBOUR_ZONE_KINDS: zoneKindList('port,anchorage'),
   /** Vessels silent for longer than this are no longer reported (stale states), hours. */
   MAX_GAP_H: boundedInteger(24, 1, 720),
@@ -62,9 +63,13 @@ const TICK_INTERVAL_MS = 5_000;
  * seen more than `DARK_GAP_MIN` (30) minutes before the feed's event-time
  * watermark while their last SOG exceeded `DARK_MIN_SOG_KN` (1) and they were
  * farther than `DARK_HARBOUR_DISTANCE_KM` (5) from any `port` / `anchorage`
- * zone; the occurrence is resolved by the vessel's next position. The
- * watermark (newest processed position, never ahead of the wall clock) keeps
- * a feed outage or a restart backlog from reporting every vessel. Severity
+ * zone; the occurrence is resolved by the vessel's next position. Only
+ * global (curated, `orgId: null`) harbour zones count: the rule serves the
+ * authorities, so a tenant's private zone must never silence it (spec §8.5).
+ * The watermark (newest processed position, never ahead of the wall clock)
+ * keeps a feed outage or a restart backlog from reporting every vessel; the
+ * scan runs only on the instance consuming positions and raises through the
+ * {@link AlertCoordinator} (one occurrence across replicas). Severity
  * `warning` (registry default). Dedup key `dark:<mmsi>`.
  *
  * @method dark.ais_gap
@@ -85,13 +90,15 @@ export class DarkDetector implements Detector<DarkConfig> {
   constructor(
     private readonly recorder: VesselStateRecorder,
     private readonly states: VesselStateStorage,
+    private readonly coordinator: AlertCoordinator,
   ) {}
 
   async onPosition(
     context: DetectorContext<DarkConfig>,
     position: VesselPosition,
   ): Promise<void> {
-    await this.recorder.observe(context.zones, position);
+    await this.coordinator.positionSeen(context.now());
+    await this.recorder.observe(context, position);
     const key = darkKey(position.mmsi);
     if (!context.alerts.isOpen(key)) return;
     // The pipeline's `previous` is the last position before the gap (the
@@ -123,6 +130,8 @@ export class DarkDetector implements Detector<DarkConfig> {
     ) {
       return;
     }
+    // Standbys (and an instance that lost the feed) never scan.
+    if (!this.coordinator.isActive(now)) return;
     const reference = darkReferenceTime(now, context.pairs.eventTime);
     if (reference === null) return;
     this.lastScanAt = now.getTime();
@@ -159,29 +168,34 @@ export class DarkDetector implements Detector<DarkConfig> {
     const harbour = context.zones.nearest(last, {
       kinds: context.config.HARBOUR_ZONE_KINDS,
       maxDistanceM: thresholds.harbourDistanceM,
+      // Curated global zones only: org-owned zones never silence the rule.
+      orgId: null,
     });
     const harbourDistanceM = harbour?.distanceM ?? null;
     if (!isDarkVessel(last, harbourDistanceM, reference, thresholds)) return;
 
     const gapMin = minutesBetween(last.time, reference);
-    await context.alerts.raise({
-      type: DARK_ALERT,
-      dedupKey: key,
-      severity: 'warning',
-      mmsi: last.mmsi,
-      title: `AIS gap of ${last.mmsi}`,
-      message: `Vessel ${last.mmsi} stopped reporting at ${last.time.toISOString()} while under way at ${last.sog.toFixed(1)} kn (silent for ${Math.round(gapMin)} min)`,
-      position: last,
-      occurredAt: last.time,
-      data: {
-        lastSeenAt: last.time.toISOString(),
-        lastSogKn: last.sog,
-        lastCogDeg: last.cog,
-        gapMin,
-        gapThresholdMin: context.config.GAP_MIN,
-        nearestHarbourM: harbourDistanceM,
-        orgId: context.fleet.orgOf(last.mmsi) ?? null,
-      },
+    await this.coordinator.exclusive(key, async () => {
+      // Another replica may have opened it (the key is aligned now).
+      if (context.alerts.isOpen(key)) return;
+      await context.alerts.raise({
+        type: DARK_ALERT,
+        dedupKey: key,
+        severity: 'warning',
+        mmsi: last.mmsi,
+        title: `AIS gap of ${last.mmsi}`,
+        message: `Vessel ${last.mmsi} stopped reporting at ${last.time.toISOString()} while under way at ${last.sog.toFixed(1)} kn (silent for ${Math.round(gapMin)} min)`,
+        position: last,
+        occurredAt: last.time,
+        data: {
+          lastSeenAt: last.time.toISOString(),
+          lastSogKn: last.sog,
+          lastCogDeg: last.cog,
+          gapMin,
+          gapThresholdMin: context.config.GAP_MIN,
+          nearestHarbourM: harbourDistanceM,
+        },
+      });
     });
   }
 }

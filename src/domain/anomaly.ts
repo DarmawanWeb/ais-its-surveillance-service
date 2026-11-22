@@ -30,16 +30,22 @@ export function isAnomalousPosition(
 
 /**
  * The anomaly streak after a position: consecutive anomalous positions are
- * counted, any consistent position resets the streak to 0.
+ * counted up to `cap` (`ANOMALY_MIN_POSITIONS`: once the anomaly is
+ * sustained the streak stops changing, so a persistently anomalous vessel is
+ * not rewritten on every position), any consistent position resets it to 0.
  *
  * @method anomaly.navstatus_mismatch
  * @see ../../../../docs/METHODOLOGY.md#anomaly.navstatus_mismatch
+ * @param previous - streak before the position (positions)
+ * @param anomalous - see {@link isAnomalousPosition}
+ * @param cap - largest streak kept (positions, ≥ 1)
  */
 export function nextAnomalyStreak(
   previous: number,
   anomalous: boolean,
+  cap: number,
 ): number {
-  return anomalous ? previous + 1 : 0;
+  return anomalous ? Math.min(previous + 1, cap) : 0;
 }
 
 /**

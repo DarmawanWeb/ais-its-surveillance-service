@@ -5,6 +5,7 @@ import {
 } from '@darmawanweb/ais-its-nest/analytics';
 import { describe, expect, it } from 'vitest';
 
+import { LocalAlertCoordinator } from '../shared/__testing__/local-alert-coordinator.js';
 import {
   MemoryTracks,
   MemoryVesselStates,
@@ -46,7 +47,9 @@ function setup(env: Record<string, string> = {}, tracks = new MemoryTracks()) {
     writeIntervalMs: 60_000,
   });
   const harness = DetectorTestHarness.create({
-    detectors: [new FishingDetector(recorder, tracks)],
+    detectors: [
+      new FishingDetector(recorder, tracks, new LocalAlertCoordinator()),
+    ],
     env,
     now: START,
   });

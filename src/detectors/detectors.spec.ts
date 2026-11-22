@@ -7,6 +7,7 @@ import { AnomalyDetector } from './anomaly/anomaly.detector.js';
 import { DarkDetector } from './dark/dark.detector.js';
 import { FishingDetector } from './fishing/fishing.detector.js';
 import { GeofenceDetector } from './geofence/geofence.detector.js';
+import { LocalAlertCoordinator } from './shared/__testing__/local-alert-coordinator.js';
 import {
   MemoryPairs,
   MemoryTracks,
@@ -32,8 +33,10 @@ const SQUARE: ZoneSnapshotV1['geometry'] = {
 function allDetectors(tracks = new MemoryTracks()) {
   const states = new MemoryVesselStates();
   const recorder = new VesselStateRecorder(states, { writeIntervalMs: 60_000 });
+  const coordinator = new LocalAlertCoordinator();
   return {
     states,
+    coordinator,
     detectors: [
       new TranshipmentDetector(
         recorder,
@@ -41,11 +44,12 @@ function allDetectors(tracks = new MemoryTracks()) {
         tracks,
         new MemoryPairs(),
         new TranshipmentMetrics(new MetricsService()),
+        coordinator,
       ),
-      new AnomalyDetector(recorder, states),
-      new DarkDetector(recorder, states),
-      new GeofenceDetector(recorder),
-      new FishingDetector(recorder, tracks),
+      new AnomalyDetector(recorder, states, coordinator),
+      new DarkDetector(recorder, states, coordinator),
+      new GeofenceDetector(recorder, coordinator),
+      new FishingDetector(recorder, tracks, coordinator),
     ],
   };
 }

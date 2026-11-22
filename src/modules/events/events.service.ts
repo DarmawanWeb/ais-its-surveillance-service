@@ -99,7 +99,12 @@ export class EventsService {
     return toEventDto(record);
   }
 
-  /** Stores a reviewer's verdict and records `surveillance_event.review` in the audit log. */
+  /**
+   * Stores a reviewer's verdict and records `surveillance_event.review` in
+   * the audit log. A body without `note` keeps the stored note (`null`
+   * clears it); a changed note is audited with its previous text, so patrol
+   * evidence is never lost.
+   */
   async review(
     principal: Principal,
     id: string,
@@ -111,12 +116,13 @@ export class EventsService {
     if (before === undefined) throw new SurveillanceEventNotFoundError(id);
     await this.events.review(id, {
       status: body.status,
-      note: body.note ?? null,
+      note: body.note,
       reviewedBy: principal.id,
       reviewedAt: new Date(),
     });
     const after = await this.events.findById(id, visibility);
     if (after === undefined) throw new SurveillanceEventNotFoundError(id);
+    const noteChanged = after.note !== before.note;
     await this.audit.record(
       {
         action: 'surveillance_event.review',
@@ -127,6 +133,10 @@ export class EventsService {
           mmsi: after.mmsi,
           from: before.status,
           to: after.status,
+          noteChanged,
+          ...(noteChanged
+            ? { previousNote: before.note, note: after.note }
+            : {}),
         },
       },
       principal,

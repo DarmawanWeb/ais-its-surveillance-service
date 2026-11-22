@@ -120,6 +120,8 @@ export const vesselState = serviceSchema.table(
       .notNull()
       .default(sql`'{}'`),
     anomalyStreak: pg.integer('anomaly_streak').notNull().default(0),
+    /** Event time of the last position the anomaly streak counted (0002). */
+    anomalyStreakAt: pg.timestamp('anomaly_streak_at', { withTimezone: true }),
     lastAlerts: pg
       .jsonb('last_alerts')
       .$type<Record<string, LastAlert>>()
@@ -134,6 +136,10 @@ export const vesselState = serviceSchema.table(
       .index('vessel_state_anomaly_idx')
       .on(table.mmsi)
       .where(sql`anomaly_streak > 0`),
+    pg
+      .index('vessel_state_anomaly_at_idx')
+      .on(table.anomalyStreakAt)
+      .where(sql`anomaly_streak_at IS NOT NULL`),
   ],
 );
 
@@ -170,6 +176,9 @@ export const transhipmentPairs = serviceSchema.table(
       .timestamp('first_seen_at', { withTimezone: true })
       .notNull(),
     lastSeenAt: pg.timestamp('last_seen_at', { withTimezone: true }).notNull(),
+    /** Last observation made by each vessel's position (idempotent accumulation, 0002). */
+    lastSeenByAAt: pg.timestamp('last_seen_by_a_at', { withTimezone: true }),
+    lastSeenByBAt: pg.timestamp('last_seen_by_b_at', { withTimezone: true }),
     lastDistanceM: pg.doublePrecision('last_distance_m'),
     observations: pg.integer('observations').notNull().default(0),
     claimedAt: pg.timestamp('claimed_at', { withTimezone: true }),
@@ -246,6 +255,54 @@ export const events = serviceSchema.table(
       .on(table.relatedMmsi, table.time.desc())
       .where(sql`related_mmsi IS NOT NULL`),
     pg.index('events_type_time_idx').on(table.type, table.time.desc()),
+  ],
+);
+
+/**
+ * Every positive transhipment analysis (hypertable on `start_at`, 0002):
+ * legacy `IllegalTranshipmentResult` rows with `isIllegal: true`, linked to
+ * the event of their occurrence. Append-only.
+ */
+export const transhipmentResults = serviceSchema.table(
+  'transhipment_results',
+  {
+    id: pg.uuid('id').notNull(),
+    startAt: pg.timestamp('start_at', { withTimezone: true }).notNull(),
+    endAt: pg.timestamp('end_at', { withTimezone: true }).notNull(),
+    detectedAt: pg.timestamp('detected_at', { withTimezone: true }).notNull(),
+    mmsiA: pg.integer('mmsi_a').notNull(),
+    mmsiB: pg.integer('mmsi_b').notNull(),
+    eventId: pg.uuid('event_id').notNull(),
+    accuracy: pg.doublePrecision('accuracy').notNull(),
+    averagePriority: pg.doublePrecision('average_priority').notNull(),
+    priorityDistribution: pg
+      .jsonb('priority_distribution')
+      .$type<{ low: number; medium: number; high: number }>()
+      .notNull(),
+    severity: pg.text('severity').$type<AlertSeverity>().notNull(),
+    geom: geography('geom', { subtype: 'Point' }),
+    accumulatedPriority: pg.doublePrecision('accumulated_priority').notNull(),
+    observations: pg.integer('observations').notNull(),
+    route1Points: pg.integer('route1_points').notNull(),
+    route2Points: pg.integer('route2_points').notNull(),
+    methodId: pg.text('method_id').notNull(),
+    createdAt: pg
+      .timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    pg.primaryKey({ columns: [table.id, table.startAt] }),
+    pg
+      .index('transhipment_results_time_id_idx')
+      .on(table.startAt.desc(), table.id.desc()),
+    pg
+      .index('transhipment_results_mmsi_a_idx')
+      .on(table.mmsiA, table.startAt.desc()),
+    pg
+      .index('transhipment_results_mmsi_b_idx')
+      .on(table.mmsiB, table.startAt.desc()),
+    pg.index('transhipment_results_event_idx').on(table.eventId),
   ],
 );
 

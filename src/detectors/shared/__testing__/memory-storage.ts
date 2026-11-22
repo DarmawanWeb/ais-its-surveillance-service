@@ -9,13 +9,16 @@ import type { TranshipmentPairStatus } from '../../../db/schema.js';
 import type { PairObservation } from '../../../domain/transhipment/pairs.js';
 import type { TrackFix } from '../../../domain/transhipment/track.js';
 import {
+  type AccumulateOptions,
   type ClaimedPair,
   type ClaimOptions,
   type PairAnalysisOutcome,
   pairMapKey,
   TranshipmentPairStorage,
+  type TranshipmentResultRecord,
 } from '../../transhipment/transhipment-pairs.storage.js';
 import {
+  type AnomalyStreak,
   type SilentVesselsQuery,
   type StoredNeighbour,
   type StoredNeighbourQuery,
@@ -28,7 +31,7 @@ import {
 export class MemoryVesselStates extends VesselStateStorage {
   readonly states = new Map<
     number,
-    StoredVesselState & { anomalyStreak: number }
+    StoredVesselState & { anomalyStreak: number; anomalyStreakAt: Date | null }
   >();
   writes = 0;
 
@@ -41,6 +44,10 @@ export class MemoryVesselStates extends VesselStateStorage {
     this.writes += 1;
     const known = this.states.get(position.mmsi);
     if (known !== undefined && known.time > position.time) return;
+    const lastCounted = known?.anomalyStreakAt ?? null;
+    const counts =
+      patch.anomalyStreak !== undefined &&
+      (lastCounted === null || position.time > lastCounted);
     this.states.set(position.mmsi, {
       mmsi: position.mmsi,
       time: position.time,
@@ -53,16 +60,37 @@ export class MemoryVesselStates extends VesselStateStorage {
       navstatus: position.navstatus,
       predictedNavstatus: position.predictedNavstatus,
       inZoneIds: [...inZoneIds],
-      anomalyStreak: patch.anomalyStreak ?? known?.anomalyStreak ?? 0,
+      anomalyStreak: counts
+        ? (patch.anomalyStreak ?? 0)
+        : (known?.anomalyStreak ?? 0),
+      anomalyStreakAt: counts
+        ? position.time
+        : (known?.anomalyStreakAt ?? null),
     });
   }
 
-  async anomalyStreaks(): Promise<ReadonlyMap<number, number>> {
+  async anomalyStreaks(): Promise<ReadonlyMap<number, AnomalyStreak>> {
     await Promise.resolve();
+    const counted = [...this.states.values()].filter(
+      (state) => state.anomalyStreakAt !== null,
+    );
+    const newest = Math.max(
+      ...counted.map((state) => state.anomalyStreakAt?.getTime() ?? 0),
+    );
     return new Map(
-      [...this.states.values()]
-        .filter((state) => state.anomalyStreak > 0)
-        .map((state) => [state.mmsi, state.anomalyStreak]),
+      counted
+        .filter(
+          (state) =>
+            state.anomalyStreak > 0 ||
+            (state.anomalyStreakAt?.getTime() ?? 0) >= newest - 60 * 60_000,
+        )
+        .map((state) => [
+          state.mmsi,
+          {
+            streak: state.anomalyStreak,
+            at: state.anomalyStreakAt ?? new Date(0),
+          },
+        ]),
     );
   }
 
@@ -143,6 +171,8 @@ interface MemoryPair {
   queuedAt: Date;
   firstSeenAt: Date;
   lastSeenAt: Date;
+  lastSeenByAAt: Date | null;
+  lastSeenByBAt: Date | null;
   observations: number;
   lastDistanceM: number | null;
   claimedAt: Date | null;
@@ -157,14 +187,18 @@ interface MemoryPair {
 export class MemoryPairs extends TranshipmentPairStorage {
   readonly pairs = new Map<string, MemoryPair>();
 
+  readonly results: TranshipmentResultRecord[] = [];
+
   async accumulate(
     observations: readonly PairObservation[],
     now: Date,
+    options: AccumulateOptions,
   ): Promise<void> {
     await Promise.resolve();
     for (const observation of observations) {
       const key = pairMapKey(observation.mmsiA, observation.mmsiB);
       const known = this.pairs.get(key);
+      const byA = observation.observer === observation.mmsiA;
       if (known === undefined) {
         this.pairs.set(key, {
           mmsiA: observation.mmsiA,
@@ -174,6 +208,8 @@ export class MemoryPairs extends TranshipmentPairStorage {
           queuedAt: now,
           firstSeenAt: observation.seenAt,
           lastSeenAt: observation.seenAt,
+          lastSeenByAAt: byA ? observation.seenAt : null,
+          lastSeenByBAt: byA ? null : observation.seenAt,
           observations: 1,
           lastDistanceM: observation.distanceM,
           claimedAt: null,
@@ -185,19 +221,30 @@ export class MemoryPairs extends TranshipmentPairStorage {
         });
         continue;
       }
-      const finished =
-        known.status === 'completed' || known.status === 'failed';
-      known.priority = finished
+      const lastOfObserver = byA ? known.lastSeenByAAt : known.lastSeenByBAt;
+      if (lastOfObserver !== null && observation.seenAt <= lastOfObserver)
+        continue;
+      const fresh =
+        known.status === 'completed' ||
+        known.status === 'failed' ||
+        (known.status === 'pending' &&
+          known.lastSeenAt.getTime() <
+            observation.seenAt.getTime() - options.restartAfterMs);
+      known.priority = fresh
         ? observation.priority
         : known.priority + observation.priority;
-      known.queuedAt = finished ? now : known.queuedAt;
-      known.status = finished ? 'pending' : known.status;
+      known.queuedAt = fresh ? now : known.queuedAt;
+      known.firstSeenAt = fresh ? observation.seenAt : known.firstSeenAt;
+      known.observations = fresh ? 1 : known.observations + 1;
+      if (known.status === 'completed' || known.status === 'failed')
+        known.status = 'pending';
       known.lastSeenAt =
         observation.seenAt > known.lastSeenAt
           ? observation.seenAt
           : known.lastSeenAt;
+      if (byA) known.lastSeenByAAt = observation.seenAt;
+      else known.lastSeenByBAt = observation.seenAt;
       known.lastDistanceM = observation.distanceM;
-      known.observations += 1;
     }
   }
 
@@ -226,6 +273,7 @@ export class MemoryPairs extends TranshipmentPairStorage {
     return claimable.map((pair) => ({
       mmsiA: pair.mmsiA,
       mmsiB: pair.mmsiB,
+      claimedAt: options.now,
       priority: pair.priority,
       queuedAt: pair.queuedAt,
       firstSeenAt: pair.firstSeenAt,
@@ -239,10 +287,10 @@ export class MemoryPairs extends TranshipmentPairStorage {
     pair: ClaimedPair,
     outcome: PairAnalysisOutcome,
     now: Date,
-  ): Promise<void> {
+  ): Promise<boolean> {
     await Promise.resolve();
-    const known = this.pairs.get(pairMapKey(pair.mmsiA, pair.mmsiB));
-    if (known?.status !== 'in_progress') return;
+    const known = this.claimOf(pair);
+    if (known === undefined) return false;
     const remaining = known.priority - (known.claimedPriority ?? 0);
     known.priority = Math.max(remaining, 0);
     known.status = remaining > 0 ? 'pending' : 'completed';
@@ -254,12 +302,15 @@ export class MemoryPairs extends TranshipmentPairStorage {
     known.lastResult = { outcome: outcome.outcome, ...outcome.result };
     known.claimedAt = null;
     known.claimedPriority = null;
+    if (outcome.outcome === 'analysed' && outcome.positive !== undefined)
+      this.results.push(outcome.positive);
+    return true;
   }
 
   async fail(pair: ClaimedPair, error: string, now: Date): Promise<void> {
     await Promise.resolve();
-    const known = this.pairs.get(pairMapKey(pair.mmsiA, pair.mmsiB));
-    if (known?.status !== 'in_progress') return;
+    const known = this.claimOf(pair);
+    if (known === undefined) return;
     known.status = 'failed';
     known.lastError = error;
     known.lastAnalysedAt = now;
@@ -270,8 +321,8 @@ export class MemoryPairs extends TranshipmentPairStorage {
   async release(pairs: readonly ClaimedPair[]): Promise<void> {
     await Promise.resolve();
     for (const pair of pairs) {
-      const known = this.pairs.get(pairMapKey(pair.mmsiA, pair.mmsiB));
-      if (known?.status === 'in_progress') {
+      const known = this.claimOf(pair);
+      if (known !== undefined) {
         known.status = 'pending';
         known.claimedAt = null;
         known.claimedPriority = null;
@@ -313,10 +364,7 @@ export class MemoryPairs extends TranshipmentPairStorage {
     await Promise.resolve();
     let pruned = 0;
     for (const [key, pair] of this.pairs) {
-      if (
-        (pair.status === 'completed' || pair.status === 'failed') &&
-        pair.lastSeenAt < seenBefore
-      ) {
+      if (pair.status !== 'in_progress' && pair.lastSeenAt < seenBefore) {
         this.pairs.delete(key);
         pruned += 1;
       }
@@ -332,6 +380,15 @@ export class MemoryPairs extends TranshipmentPairStorage {
     for (const pair of this.pairs.values())
       counts[pair.status] = (counts[pair.status] ?? 0) + 1;
     return counts;
+  }
+
+  /** The pair while `claim` holds it. */
+  private claimOf(claim: ClaimedPair): MemoryPair | undefined {
+    const known = this.pairs.get(pairMapKey(claim.mmsiA, claim.mmsiB));
+    return known?.status === 'in_progress' &&
+      known.claimedAt?.getTime() === claim.claimedAt.getTime()
+      ? known
+      : undefined;
   }
 
   /** The stored pair (tests). */

@@ -83,11 +83,17 @@ export class ReviewEventDto {
   @IsIn(REVIEW_STATUSES)
   readonly status!: ReviewStatus;
 
-  @ApiPropertyOptional({ maxLength: 2_000, nullable: true })
+  @ApiPropertyOptional({
+    type: 'string',
+    maxLength: 2_000,
+    nullable: true,
+    description:
+      'Reviewer note: omitted keeps the stored note, `null` clears it, a string replaces it',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(2_000)
-  readonly note?: string;
+  readonly note?: string | null;
 }
 
 /** A surveillance event (`events` row) as returned by the API. */

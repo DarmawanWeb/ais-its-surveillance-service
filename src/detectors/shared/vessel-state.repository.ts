@@ -14,6 +14,7 @@ import { sql } from 'drizzle-orm';
 import { type RawTimestamp, rowDate } from '../../db/rows.js';
 import type * as schema from '../../db/schema.js';
 import {
+  type AnomalyStreak,
   type SilentVesselsQuery,
   type StoredNeighbour,
   type StoredNeighbourQuery,
@@ -35,6 +36,13 @@ interface VesselStateRow extends Record<string, unknown> {
   pred_navstatus: PredictedNavStatus;
   in_zone_ids: string[];
 }
+
+/**
+ * Zero streaks counted within this window before the newest counted position
+ * are restored too: a position redelivered after a crash is at most minutes
+ * older than the newest one, minutes of event time.
+ */
+const ZERO_STREAK_RESTORE_WINDOW_MIN = 60;
 
 const STATE_COLUMNS = sql`mmsi, time, source, ST_Y(geom::geometry) AS lat, ST_X(geom::geometry) AS lon,
   sog, cog, hdg, navstatus, pred_navstatus, in_zone_ids`;
@@ -68,13 +76,15 @@ export class VesselStateRepository extends VesselStateStorage {
     patch: { readonly anomalyStreak?: number } = {},
   ): Promise<void> {
     const streak = patch.anomalyStreak;
+    const streakAt = streak === undefined ? null : position.time;
     await this.db.execute(sql`
       INSERT INTO vessel_state AS s
-        (mmsi, time, source, geom, sog, cog, hdg, navstatus, pred_navstatus, in_zone_ids, anomaly_streak)
+        (mmsi, time, source, geom, sog, cog, hdg, navstatus, pred_navstatus, in_zone_ids,
+         anomaly_streak, anomaly_streak_at)
       VALUES (${position.mmsi}, ${position.time}, ${position.source},
         ${pointGeography(position.lon, position.lat)}, ${position.sog}, ${position.cog},
         ${position.hdg}, ${position.navstatus}, ${position.predictedNavstatus},
-        ${sql.param([...inZoneIds])}::uuid[], ${streak ?? 0})
+        ${sql.param([...inZoneIds])}::uuid[], ${streak ?? 0}, ${streakAt}::timestamptz)
       ON CONFLICT (mmsi) DO UPDATE SET
         time = EXCLUDED.time,
         source = EXCLUDED.source,
@@ -85,19 +95,34 @@ export class VesselStateRepository extends VesselStateStorage {
         navstatus = EXCLUDED.navstatus,
         pred_navstatus = EXCLUDED.pred_navstatus,
         in_zone_ids = EXCLUDED.in_zone_ids,
-        anomaly_streak = ${streak === undefined ? sql`s.anomaly_streak` : sql`EXCLUDED.anomaly_streak`},
+        -- Only a position newer than the last counted one changes the streak
+        -- (NULL when the write carries no streak: the counter is kept).
+        anomaly_streak = CASE
+          WHEN EXCLUDED.anomaly_streak_at > COALESCE(s.anomaly_streak_at, '-infinity'::timestamptz)
+          THEN EXCLUDED.anomaly_streak ELSE s.anomaly_streak END,
+        anomaly_streak_at = GREATEST(s.anomaly_streak_at, EXCLUDED.anomaly_streak_at),
         updated_at = now()
       WHERE s.time <= EXCLUDED.time`);
   }
 
-  async anomalyStreaks(): Promise<ReadonlyMap<number, number>> {
+  async anomalyStreaks(): Promise<ReadonlyMap<number, AnomalyStreak>> {
     const { rows } = await this.db.execute<{
       mmsi: number;
       anomaly_streak: number;
-    }>(
-      sql`SELECT mmsi, anomaly_streak FROM vessel_state WHERE anomaly_streak > 0`,
+      anomaly_streak_at: RawTimestamp;
+    }>(sql`
+      SELECT mmsi, anomaly_streak, anomaly_streak_at
+      FROM vessel_state
+      WHERE anomaly_streak_at IS NOT NULL
+        AND (anomaly_streak > 0
+             OR anomaly_streak_at >= (SELECT max(anomaly_streak_at) FROM vessel_state)
+                                     - ${`${ZERO_STREAK_RESTORE_WINDOW_MIN} minutes`}::interval)`);
+    return new Map(
+      rows.map((row) => [
+        row.mmsi,
+        { streak: row.anomaly_streak, at: rowDate(row.anomaly_streak_at) },
+      ]),
     );
-    return new Map(rows.map((row) => [row.mmsi, row.anomaly_streak]));
   }
 
   async neighbours(query: StoredNeighbourQuery): Promise<StoredNeighbour[]> {

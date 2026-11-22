@@ -73,7 +73,8 @@ export interface EventCursor {
 /** A review to store. */
 export interface EventReview {
   readonly status: 'open' | 'confirmed' | 'dismissed';
-  readonly note: string | null;
+  /** New note; `null` clears it, `undefined` keeps the stored one. */
+  readonly note: string | null | undefined;
   readonly reviewedBy: string;
   readonly reviewedAt: Date;
 }
@@ -223,17 +224,19 @@ export class EventsRepository {
 
   /**
    * Stores a review verdict; `open` withdraws a verdict (`resolved` when the
-   * detector already ended the occurrence). Returns `false` for an unknown event.
+   * detector already ended the occurrence). The note changes only when the
+   * review carries one (`null` clears it). Returns `false` for an unknown event.
    */
   async review(id: string, review: EventReview): Promise<boolean> {
     const status =
       review.status === 'open'
         ? sql`CASE WHEN resolved_at IS NULL THEN 'open' ELSE 'resolved' END`
         : sql`${review.status}`;
+    const note = review.note === undefined ? sql`note` : sql`${review.note}`;
     const { rowCount } = await this.db.execute(sql`
       UPDATE events SET
         status = ${status},
-        note = ${review.note},
+        note = ${note},
         reviewed_by = ${review.reviewedBy}::uuid,
         reviewed_at = ${review.reviewedAt},
         updated_at = now()

@@ -1,6 +1,9 @@
+import type { ZoneSnapshotV1 } from '@darmawanweb/ais-its-contracts/events';
+import { newId } from '@darmawanweb/ais-its-contracts/domain';
 import { DetectorTestHarness } from '@darmawanweb/ais-its-nest/analytics';
 import { describe, expect, it } from 'vitest';
 
+import { LocalAlertCoordinator } from '../shared/__testing__/local-alert-coordinator.js';
 import { MemoryVesselStates } from '../shared/__testing__/memory-storage.js';
 import { VesselStateRecorder } from '../shared/vessel-state.recorder.js';
 import { DarkDetector, darkKey } from './dark.detector.js';
@@ -14,12 +17,13 @@ const at = (minutes: number): Date =>
 function setup(env: Record<string, string> = {}) {
   const states = new MemoryVesselStates();
   const recorder = new VesselStateRecorder(states, { writeIntervalMs: 60_000 });
+  const coordinator = new LocalAlertCoordinator();
   const harness = DetectorTestHarness.create({
-    detectors: [new DarkDetector(recorder, states)],
+    detectors: [new DarkDetector(recorder, states, coordinator)],
     env,
     now: START,
   });
-  return { harness, states };
+  return { harness, states, coordinator };
 }
 
 /** A second vessel keeps reporting, so the feed's event time advances. */
@@ -161,5 +165,89 @@ describe('DarkDetector', () => {
     await liveFeed(harness, 11);
     await harness.tick(at(11));
     expect(harness.alertsOf('dark')).toHaveLength(1);
+  });
+
+  describe('harbour zones (tenancy, spec §8.5)', () => {
+    /** A large anchorage over open sea around the dark vessel's last position. */
+    const ANCHORAGE: ZoneSnapshotV1['geometry'] = {
+      type: 'Polygon',
+      coordinates: [
+        [
+          [104, 1],
+          [106, 1],
+          [106, 2],
+          [104, 2],
+          [104, 1],
+        ],
+      ],
+    };
+
+    async function darkAlerts(
+      zoneOrgId: string | null | undefined,
+      vesselOrgId?: string,
+    ) {
+      const { harness } = setup();
+      if (vesselOrgId !== undefined)
+        await harness.vessel({ mmsi: DARK, orgId: vesselOrgId });
+      if (zoneOrgId !== undefined)
+        await harness.zone({
+          kind: 'anchorage',
+          orgId: zoneOrgId,
+          geometry: ANCHORAGE,
+        });
+      await harness.position({
+        mmsi: DARK,
+        time: at(0),
+        lat: 1.5,
+        lon: 105,
+        sog: 6,
+        cog: 80,
+      });
+      await liveFeed(harness, 40);
+      await harness.tick(at(40));
+      return harness.alertsOf('dark').length;
+    }
+
+    it('a global anchorage exempts the vessel', async () => {
+      expect(await darkAlerts(undefined)).toBe(1);
+      expect(await darkAlerts(null)).toBe(0);
+    });
+
+    it("another tenant's private anchorage never silences the rule", async () => {
+      expect(await darkAlerts(newId())).toBe(1);
+    });
+
+    it("the vessel's own organization's private anchorage does not either", async () => {
+      const orgId = newId();
+      expect(await darkAlerts(orgId, orgId)).toBe(1);
+    });
+  });
+
+  it('never scans on a standby (no position handled within the active window)', async () => {
+    const { harness, coordinator } = setup({ DARK_CHECK_INTERVAL_S: '1' });
+    await harness.position({
+      mmsi: DARK,
+      time: at(0),
+      lat: 1.5,
+      lon: 105,
+      sog: 6,
+    });
+    await liveFeed(harness, 31);
+    // The feed moved to another instance 5 minutes ago.
+    await harness.tick(at(36));
+    expect(harness.alertsOf('dark')).toEqual([]);
+    expect(coordinator.isActive(at(36))).toBe(false);
+
+    await harness.position({
+      mmsi: LIVE,
+      time: at(36.5),
+      lat: 0.5,
+      lon: 108,
+      sog: 8,
+    });
+    await harness.tick(at(37));
+    expect(harness.alertsOf('dark')).toHaveLength(1);
+    // The raise ran through the coordinator (one occurrence across replicas).
+    expect(coordinator.exclusiveKeys).toEqual([darkKey(DARK)]);
   });
 });

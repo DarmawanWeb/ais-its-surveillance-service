@@ -1,13 +1,12 @@
 import { Module } from '@nestjs/common';
 
-import { EventsModule } from '../events/events.module.js';
+import { TranshipmentResultsRepository } from './transhipment-results.repository.js';
 import { TranshipmentsController } from './transhipments.controller.js';
 import { TranshipmentsService } from './transhipments.service.js';
 
-/** `GET /surveillance/transhipments` — transhipment events, legacy result shape. */
+/** `GET /surveillance/transhipments` — every positive analysis, legacy result shape. */
 @Module({
-  imports: [EventsModule],
   controllers: [TranshipmentsController],
-  providers: [TranshipmentsService],
+  providers: [TranshipmentsService, TranshipmentResultsRepository],
 })
 export class TranshipmentsModule {}

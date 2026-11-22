@@ -11,7 +11,7 @@ import {
   pointGeography,
 } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
-import { and, eq, isNull, ne, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, ne, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.js';
 
@@ -157,27 +157,66 @@ export class DetectorEventsRepository implements AlertPersistence {
   /**
    * Occurrences the detectors have not ended (whatever their review status),
    * restored at startup so a restart neither re-raises them nor hands them
-   * to another detector.
+   * to another detector (also reloaded by the `AlertCoordinator` when this
+   * instance takes over the position feed).
    */
   async loadOpen(): Promise<readonly OpenAlert[]> {
     const rows = await this.db
-      .select()
+      .select(OPEN_ALERT_COLUMNS)
       .from(events)
       .where(isNull(events.resolvedAt));
-    return rows.map((row) => ({
-      alertId: row.id,
-      dedupKey: row.dedupKey,
-      type: row.type,
-      mmsi: row.mmsi,
-      relatedMmsi: row.relatedMmsi,
-      zoneId: row.zoneId,
-      severity: row.currentSeverity,
-      publishedSeverity: row.severity,
-      openedAt: row.openedAt,
-      // The row is written right before the alert is published.
-      publishedAt: row.createdAt,
-      lastSeenAt: row.lastSeenAt,
-      detector: row.detector,
-    }));
+    return rows.map(toOpenAlert);
   }
+
+  /** The open occurrence of `dedupKey` (its newest alert), if any. */
+  async openOccurrence(dedupKey: string): Promise<OpenAlert | undefined> {
+    const [row] = await this.db
+      .select(OPEN_ALERT_COLUMNS)
+      .from(events)
+      .where(and(eq(events.dedupKey, dedupKey), isNull(events.resolvedAt)))
+      .orderBy(desc(events.createdAt))
+      .limit(1);
+    return row === undefined ? undefined : toOpenAlert(row);
+  }
+}
+
+/** The columns of an open occurrence the SDK needs (never `data`, `title`, `message`). */
+const OPEN_ALERT_COLUMNS = {
+  id: events.id,
+  dedupKey: events.dedupKey,
+  type: events.type,
+  mmsi: events.mmsi,
+  relatedMmsi: events.relatedMmsi,
+  zoneId: events.zoneId,
+  currentSeverity: events.currentSeverity,
+  severity: events.severity,
+  openedAt: events.openedAt,
+  createdAt: events.createdAt,
+  lastSeenAt: events.lastSeenAt,
+  detector: events.detector,
+};
+
+/** A row selected with {@link OPEN_ALERT_COLUMNS}. */
+type OpenAlertRow = Pick<
+  typeof events.$inferSelect,
+  keyof typeof OPEN_ALERT_COLUMNS
+>;
+
+/** The SDK view of an `events` row that is still open. */
+function toOpenAlert(row: OpenAlertRow): OpenAlert {
+  return {
+    alertId: row.id,
+    dedupKey: row.dedupKey,
+    type: row.type,
+    mmsi: row.mmsi,
+    relatedMmsi: row.relatedMmsi,
+    zoneId: row.zoneId,
+    severity: row.currentSeverity,
+    publishedSeverity: row.severity,
+    openedAt: row.openedAt,
+    // The row is written right before the alert is published.
+    publishedAt: row.createdAt,
+    lastSeenAt: row.lastSeenAt,
+    detector: row.detector,
+  };
 }

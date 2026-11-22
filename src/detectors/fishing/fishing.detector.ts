@@ -17,6 +17,7 @@ import {
   type LoiteringThresholds,
   trimRun,
 } from '../../domain/fishing.js';
+import { AlertCoordinator } from '../shared/alert-coordinator.js';
 import {
   boundedInteger,
   optionalZoneKindList,
@@ -121,6 +122,7 @@ export class FishingDetector implements Detector<FishingConfig> {
   constructor(
     private readonly recorder: VesselStateRecorder,
     private readonly tracks: TrackStorage,
+    private readonly coordinator: AlertCoordinator,
   ) {}
 
   async onPosition(
@@ -129,7 +131,8 @@ export class FishingDetector implements Detector<FishingConfig> {
   ): Promise<void> {
     const { config } = context;
     const thresholds = thresholdsOf(config);
-    await this.recorder.observe(context.zones, position);
+    await this.coordinator.positionSeen(context.now());
+    await this.recorder.observe(context, position);
     const zones = this.zonesOf(context, position);
 
     if (zones.length > 0) {
@@ -183,7 +186,6 @@ export class FishingDetector implements Detector<FishingConfig> {
             meanSogKn: evaluation.meanSogKn,
             courseChangeRateDegPerMin: evaluation.courseChangeRateDegPerMin,
             totalCourseChangeDeg: evaluation.totalCourseChangeDeg,
-            orgId: context.fleet.orgOf(position.mmsi) ?? null,
           },
         });
       }

@@ -1,6 +1,7 @@
 import { newId } from '@darmawanweb/ais-its-contracts/domain';
 import {
   type AlertRaisedV1,
+  EVENT_TYPES,
   parseEnvelope,
   subjects,
 } from '@darmawanweb/ais-its-contracts/events';
@@ -62,6 +63,7 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
     transhipmentAB: newId(),
     anomalyX: newId(),
   };
+  const resultId = newId();
 
   /** An alert as the Detector SDK would persist it. */
   function alert(
@@ -162,6 +164,26 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
         10,
       ),
       'raised',
+    );
+    // The analysis behind the transhipment event (transhipment_results).
+    await fixtures.rows(
+      `INSERT INTO transhipment_results
+         (id, start_at, end_at, detected_at, mmsi_a, mmsi_b, event_id, accuracy,
+          average_priority, priority_distribution, severity, geom,
+          accumulated_priority, observations, route1_points, route2_points, method_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 87.4, 19.8,
+               '{"low":0,"medium":20,"high":80}', 'warning',
+               ST_SetSRID(ST_MakePoint(130.5, -10.5), 4326)::geography,
+               540, 30, 60, 60, 'transhipment.accuracy')`,
+      [
+        resultId,
+        new Date(T0),
+        new Date(T0 + 30 * 60_000),
+        new Date(T0 + 40 * 60_000),
+        Math.min(vesselA, vesselB),
+        Math.max(vesselA, vesselB),
+        ids.transhipmentAB,
+      ],
     );
     await events.onRaised(
       alert(
@@ -317,16 +339,65 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
     expect(parsed.success && parsed.envelope.data).toMatchObject({
       action: 'surveillance_event.review',
       targetId: ids.darkB,
-      meta: { from: 'open', to: 'confirmed' },
+      meta: {
+        from: 'open',
+        to: 'confirmed',
+        noteChanged: true,
+        previousNote: null,
+        note: 'Verified with patrol',
+      },
     });
 
+    // A verdict without a note keeps the patrol's note …
+    const dismissed = await service.app.inject({
+      method: 'PATCH',
+      url,
+      headers,
+      payload: { status: 'dismissed' },
+    });
+    expect(dismissed.json()).toMatchObject({
+      status: 'dismissed',
+      note: 'Verified with patrol',
+    });
     const reopened = await service.app.inject({
       method: 'PATCH',
       url,
       headers,
       payload: { status: 'open' },
     });
-    expect(reopened.json()).toMatchObject({ status: 'open', note: null });
+    expect(reopened.json()).toMatchObject({
+      status: 'open',
+      note: 'Verified with patrol',
+    });
+    // … an explicit null clears it, and the audit entry keeps the old text.
+    const cleared = await service.app.inject({
+      method: 'PATCH',
+      url,
+      headers,
+      payload: { status: 'open', note: null },
+    });
+    expect(cleared.json()).toMatchObject({ status: 'open', note: null });
+    const clearedAudit = await waitFor(async () => {
+      const stored = await manager.streams.getMessage('AUDIT', {
+        last_by_subj: subjects.audit(SERVICE.name),
+      });
+      if (stored === null) return undefined;
+      const envelope = parseEnvelope(stored.data);
+      if (
+        !envelope.success ||
+        envelope.envelope.type !== EVENT_TYPES.AUDIT_RECORDED
+      )
+        return undefined;
+      return envelope.envelope.data.meta.noteChanged === true &&
+        envelope.envelope.data.meta.note === null
+        ? envelope.envelope.data
+        : undefined;
+    });
+    expect(clearedAudit.meta).toMatchObject({
+      noteChanged: true,
+      previousNote: 'Verified with patrol',
+      note: null,
+    });
 
     const resolved = await service.app.inject({
       method: 'PATCH',
@@ -384,7 +455,8 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
     expect(response.statusCode).toBe(200);
     expect(response.json<Page<unknown>>().data).toEqual([
       {
-        id: ids.transhipmentAB,
+        id: resultId,
+        eventId: ids.transhipmentAB,
         ship1MMSI: Math.min(vesselA, vesselB),
         ship2MMSI: Math.max(vesselA, vesselB),
         ship1Name: vesselA < vesselB ? 'KM Alpha' : 'KM Bravo',
@@ -395,7 +467,7 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
         accuracy: 87.4,
         averagePriority: 19.8,
         priorityDistribution: { low: 0, medium: 20, high: 80 },
-        detectedAt: expect.any(String) as string,
+        detectedAt: new Date(T0 + 40 * 60_000).toISOString(),
         severity: 'warning',
         status: 'open',
         lat: -10.5,
@@ -403,6 +475,12 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
         methodId: 'transhipment.accuracy',
       },
     ]);
+    // Tenancy: a third organization sees neither vessel's results.
+    const other = await get(`${BASE}/transhipments?mmsi=${vesselA}`, {
+      roles: ['viewer'],
+      orgId: newId(),
+    });
+    expect(other.json<Page<unknown>>().data).toEqual([]);
   });
 
   it('aggregates a heatmap with ST_SnapToGrid, respecting tenancy', async () => {

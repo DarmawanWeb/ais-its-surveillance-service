@@ -6,61 +6,40 @@ import {
   resolveQueryTimeRange,
 } from '@darmawanweb/ais-its-nest/http';
 import { Injectable } from '@nestjs/common';
-import * as z from 'zod';
 
-import { TRANSHIPMENT_ALERT } from '../../detectors/transhipment/transhipment.detector.js';
 import { eventVisibility } from '../../tenancy/event-visibility.js';
-import {
-  type EventRecord,
-  EventsRepository,
-} from '../events/events.repository.js';
 import {
   EVENTS_DEFAULT_RANGE_MS,
   EVENTS_MAX_RANGE_MS,
   EventCursorSchema,
 } from '../events/events.service.js';
+import {
+  type StoredTranshipmentResult,
+  TranshipmentResultsRepository,
+} from './transhipment-results.repository.js';
 import type {
   ListTranshipmentsQueryDto,
   TranshipmentResultView,
 } from './transhipments.dto.js';
 
-/** The detection data stored with a transhipment event. */
-const TranshipmentDataSchema = z.object({
-  startTimestamp: z.iso.datetime(),
-  endTimestamp: z.iso.datetime(),
-  accuracy: z.number(),
-  averagePriority: z.number(),
-  priorityDistribution: z.object({
-    low: z.number(),
-    medium: z.number(),
-    high: z.number(),
-  }),
-});
-
-/**
- * Maps a transhipment event to the legacy result shape; `undefined` for a
- * row whose data does not carry a detection (never written by this service).
- */
+/** A stored positive analysis in the legacy result shape (plus the v2 fields). */
 export function toTranshipmentResult(
-  record: EventRecord,
-  detectedAt: Date,
-): TranshipmentResultView | undefined {
-  const parsed = TranshipmentDataSchema.safeParse(record.data);
-  if (!parsed.success || record.relatedMmsi === null) return undefined;
-  const detection = parsed.data;
+  record: StoredTranshipmentResult,
+): TranshipmentResultView {
   return {
     id: record.id,
-    ship1MMSI: record.mmsi,
-    ship2MMSI: record.relatedMmsi,
-    ship1Name: record.vesselName,
-    ship2Name: record.relatedVesselName,
+    eventId: record.eventId,
+    ship1MMSI: record.mmsiA,
+    ship2MMSI: record.mmsiB,
+    ship1Name: record.nameA,
+    ship2Name: record.nameB,
     isIllegal: true,
-    startTimestamp: detection.startTimestamp,
-    endTimestamp: detection.endTimestamp,
-    accuracy: detection.accuracy,
-    averagePriority: detection.averagePriority,
-    priorityDistribution: detection.priorityDistribution,
-    detectedAt: detectedAt.toISOString(),
+    startTimestamp: record.startAt.toISOString(),
+    endTimestamp: record.endAt.toISOString(),
+    accuracy: record.accuracy,
+    averagePriority: record.averagePriority,
+    priorityDistribution: { ...record.priorityDistribution },
+    detectedAt: record.detectedAt.toISOString(),
     severity: record.severity,
     status: record.status,
     lat: record.lat,
@@ -69,10 +48,14 @@ export function toTranshipmentResult(
   };
 }
 
-/** `GET /surveillance/transhipments`: transhipment events in the legacy result shape. */
+/**
+ * `GET /surveillance/transhipments`: every positive analysis (legacy
+ * `GET /results`, which listed each stored `isIllegal` result), newest
+ * window first; tenancy per spec §8.5 through either vessel of the pair.
+ */
 @Injectable()
 export class TranshipmentsService {
-  constructor(private readonly events: EventsRepository) {}
+  constructor(private readonly results: TranshipmentResultsRepository) {}
 
   async list(
     principal: Principal,
@@ -82,27 +65,14 @@ export class TranshipmentsService {
       defaultDurationMs: EVENTS_DEFAULT_RANGE_MS,
       maxDurationMs: EVENTS_MAX_RANGE_MS,
     });
-    const rows = await this.events.list(
-      {
-        visibility: eventVisibility(principal),
-        from,
-        to,
-        types: [TRANSHIPMENT_ALERT],
-        mmsi: query.mmsi,
-      },
+    const rows = await this.results.list(
+      { visibility: eventVisibility(principal), from, to, mmsi: query.mmsi },
       decodeQueryCursor(query, EventCursorSchema),
       query.limit + 1,
     );
-    const page = cursorPage(rows, query.limit, (row) => ({
-      time: row.time.toISOString(),
+    return cursorPage(rows.map(toTranshipmentResult), query.limit, (row) => ({
+      time: row.startTimestamp,
       id: row.id,
     }));
-    return {
-      data: page.data.flatMap((row) => {
-        const result = toTranshipmentResult(row, row.createdAt);
-        return result === undefined ? [] : [result];
-      }),
-      page: page.page,
-    };
   }
 }

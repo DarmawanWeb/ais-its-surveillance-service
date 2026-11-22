@@ -284,16 +284,19 @@ describe('detectors: zone, fleet and position events → events + alert.raised.v
       priorityDistribution: { low: 0, medium: 0, high: 100 },
     });
 
-    const [pair] = await fixtures.rows<{
-      status: string;
-      analyses: number;
-      observations: number;
-    }>(
-      'SELECT status, analyses, observations FROM transhipment_pairs WHERE mmsi_a = $1 AND mmsi_b = $2',
-      [a, b],
-    );
-    expect(pair?.analyses).toBeGreaterThanOrEqual(1);
-    expect(pair?.observations).toBeGreaterThan(0);
+    // The alert goes out during the analysis; its claim completes (with the result) right after.
+    const pair = await waitFor(async () => {
+      const [row] = await fixtures.rows<{
+        status: string;
+        analyses: number;
+        observations: number;
+      }>(
+        'SELECT status, analyses, observations FROM transhipment_pairs WHERE mmsi_a = $1 AND mmsi_b = $2',
+        [a, b],
+      );
+      return row !== undefined && row.analyses >= 1 ? row : undefined;
+    });
+    expect(pair.observations).toBeGreaterThan(0);
 
     const response = await service.app.inject({
       method: 'GET',
@@ -301,17 +304,28 @@ describe('detectors: zone, fleet and position events → events + alert.raised.v
       headers: await service.authorization({ roles: ['authority'] }),
     });
     expect(response.statusCode).toBe(200);
-    expect(response.json<{ data: unknown[] }>().data).toEqual([
+    // One stored result per positive analysis, all of the same occurrence.
+    const results = response.json<{
+      data: { eventId: string; accuracy: number }[];
+    }>().data;
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results.every((result) => result.eventId === alert.id)).toBe(true);
+    expect(results).toContainEqual(
       expect.objectContaining({
-        id: alert.id,
+        eventId: alert.id,
         ship1MMSI: a,
         ship2MMSI: b,
         isIllegal: true,
         accuracy: 100,
         averagePriority: 27,
         priorityDistribution: { low: 0, medium: 0, high: 100 },
+        severity: 'critical',
+        status: 'open',
       }),
-    ]);
+    );
+    // No organization ids in event data (spec §8.5).
+    expect(alert.data).not.toHaveProperty('orgId');
+    expect(alert.data).not.toHaveProperty('relatedOrgId');
 
     const metrics = await service.app.inject({
       method: 'GET',

@@ -367,7 +367,7 @@
             "name": "mmsi",
             "required": false,
             "in": "query",
-            "description": "Only pairs with this vessel (legacy GET /results/:mmsi)",
+            "description": "Only pairs with this vessel (legacy GET /results/:mmsi); `from` / `to` select by window start",
             "schema": {
               "type": "integer"
             }
@@ -1111,7 +1111,8 @@
           "note": {
             "type": "string",
             "maxLength": 2000,
-            "nullable": true
+            "nullable": true,
+            "description": "Reviewer note: omitted keeps the stored note, `null` clears it, a string replaces it"
           }
         },
         "required": [
@@ -1146,7 +1147,12 @@
           "id": {
             "type": "string",
             "format": "uuid",
-            "description": "Event id"
+            "description": "Result id (one per positive analysis)"
+          },
+          "eventId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Event of the occurrence (`GET /surveillance/events/:id`)"
           },
           "ship1MMSI": {
             "type": "integer",
@@ -1166,7 +1172,7 @@
           },
           "isIllegal": {
             "type": "boolean",
-            "description": "Always true: only positive analyses are events"
+            "description": "Always true: only positive analyses are stored"
           },
           "startTimestamp": {
             "type": "string",
@@ -1198,7 +1204,8 @@
               "info",
               "warning",
               "critical"
-            ]
+            ],
+            "description": "Severity of this analysis (critical from TRANSHIPMENT_CRITICAL_ACCURACY)"
           },
           "status": {
             "type": "string",
@@ -1207,11 +1214,14 @@
               "confirmed",
               "dismissed",
               "resolved"
-            ]
+            ],
+            "nullable": true,
+            "description": "Review status of the occurrence (`null` once its event expired)"
           },
           "lat": {
             "type": "object",
-            "nullable": true
+            "nullable": true,
+            "description": "Midpoint of the two vessels in the middle of the window"
           },
           "lon": {
             "type": "object",
@@ -1224,6 +1234,7 @@
         },
         "required": [
           "id",
+          "eventId",
           "ship1MMSI",
           "ship2MMSI",
           "ship1Name",

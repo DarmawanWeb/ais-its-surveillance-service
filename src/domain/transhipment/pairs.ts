@@ -22,6 +22,8 @@ export interface PairObservation {
   readonly mmsiA: number;
   /** Larger MMSI of the pair. */
   readonly mmsiB: number;
+  /** The vessel whose position made the observation (`mmsiA` or `mmsiB`). */
+  readonly observer: number;
   /** Product priority of this observation, > 0. */
   readonly priority: number;
   /** Distance between the two fixes, metres. */
@@ -104,6 +106,7 @@ export function candidateObservations(
     return {
       mmsiA,
       mmsiB,
+      observer: current.mmsi,
       priority,
       distanceM: distances.get(mmsi) ?? Number.NaN,
       seenAt: current.time,

@@ -1,4 +1,4 @@
-import type { AisSource } from '@darmawanweb/ais-its-contracts/domain';
+import { type AisSource, newId } from '@darmawanweb/ais-its-contracts/domain';
 import {
   type Detector,
   type DetectorCall,
@@ -23,6 +23,7 @@ import {
   transhipmentKey,
 } from '../../domain/transhipment/pairs.js';
 import { fixAtTime, type TrackFix } from '../../domain/transhipment/track.js';
+import { AlertCoordinator } from '../shared/alert-coordinator.js';
 import { TrackStorage, VesselStateStorage } from '../shared/storage.js';
 import { VesselStateRecorder } from '../shared/vessel-state.recorder.js';
 import {
@@ -33,6 +34,7 @@ import {
   type ClaimedPair,
   pairMapKey,
   TranshipmentPairStorage,
+  type TranshipmentResultRecord,
 } from './transhipment-pairs.storage.js';
 import { TranshipmentMetrics } from './transhipment.metrics.js';
 
@@ -60,7 +62,7 @@ export const TRANSHIPMENT_EVENT_METHOD = 'transhipment.accuracy';
 const TICK_INTERVAL_MS = 5_000;
 /** The neighbour radius is widened by this factor: the legacy haversine (3438 nm sphere) decides. */
 const SEARCH_MARGIN = 1.02;
-/** Finished pairs are deleted when not observed for this long (track retention), ms. */
+/** Pairs not observed for this long are deleted, whatever their accumulated priority (track retention), ms. */
 const PAIR_RETENTION_MS = 7 * 24 * 60 * 60_000;
 /** Analyser runs between two prunes of finished pairs. */
 const PRUNE_EVERY_RUNS = 120;
@@ -76,15 +78,22 @@ const PRUNE_EVERY_RUNS = 120;
  *    5 min (SDK `PairSearch`, plus `ST_DWithin` on `vessel_state` until the
  *    in-memory index covers a full window after a restart) are scored with
  *    the legacy speed × location × heading priority; pairs with `P > 0`
- *    accumulate `P` in `transhipment_pairs`.
- * 2. **Analyser** (tick) — claims the pending pairs above
- *    `TRANSHIPMENT_MIN_PRIORITY` (priority DESC, queued_at ASC, `SKIP
- *    LOCKED`; pairs analysed within 15 min are skipped), runs the legacy
- *    interpolation / sliding-window detection over the last 60 min (≤ 60
- *    fixes) of both tracks from `track_points` and raises a `transhipment`
- *    event (accuracy, window, average priority, distribution) when the score
- *    reaches 70; a negative analysis or a pair not observed for
- *    `TRANSHIPMENT_PAIR_EXPIRY_MIN` resolves the open occurrence.
+ *    accumulate `P` in `transhipment_pairs` (each vessel's observations
+ *    count once: a redelivered position is ignored; an accumulation not
+ *    continued within `TRANSHIPMENT_ROUTE_WINDOW_MIN` starts over). A
+ *    vessel is a candidate through a `transhipment_area` zone only when the
+ *    zone is global or its own organization's (spec §8.5).
+ * 2. **Analyser** (tick, only on the instance consuming positions) — claims
+ *    the pending pairs above `TRANSHIPMENT_MIN_PRIORITY` (priority DESC,
+ *    queued_at ASC, `SKIP LOCKED`; pairs analysed within 15 min are
+ *    skipped), runs the legacy interpolation / sliding-window detection over
+ *    the last 60 min (≤ 60 fixes) of both tracks from `track_points`, stores
+ *    every positive analysis in `transhipment_results` and raises a
+ *    `transhipment` event (accuracy, window, average priority, distribution)
+ *    when the score reaches 70; a negative analysis or a pair not observed
+ *    for `TRANSHIPMENT_PAIR_EXPIRY_MIN` resolves the open occurrence. Every
+ *    raise / resolve runs through the {@link AlertCoordinator}, so replicas
+ *    never open an occurrence twice or miss one opened by another replica.
  *
  * Severity: `critical` when the score reaches `TRANSHIPMENT_CRITICAL_ACCURACY`
  * (90), else `warning`. Dedup key `transhipment:<minMmsi>:<maxMmsi>`.
@@ -115,21 +124,25 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     private readonly tracks: TrackStorage,
     private readonly pairs: TranshipmentPairStorage,
     private readonly metrics: TranshipmentMetrics,
+    private readonly coordinator: AlertCoordinator,
   ) {}
 
   async onPosition(
     context: DetectorContext<TranshipmentConfig>,
     position: VesselPosition,
   ): Promise<void> {
+    await this.coordinator.positionSeen(context.now());
     const eligible = this.isCandidate(context, position);
-    await this.recorder.observe(context.zones, position, { force: eligible });
+    await this.recorder.observe(context, position, { force: eligible });
     if (!eligible) return;
 
     await this.tracks.append(position);
     const neighbours = await this.neighbours(context, position);
     const observations = candidateObservations(position, neighbours);
     if (observations.length === 0) return;
-    await this.pairs.accumulate(observations, context.now());
+    await this.pairs.accumulate(observations, context.now(), {
+      restartAfterMs: context.config.ROUTE_WINDOW_MIN * 60_000,
+    });
     this.metrics.observed(observations.length);
   }
 
@@ -145,6 +158,8 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     ) {
       return;
     }
+    // Only the instance consuming positions analyses (never a standby).
+    if (!this.coordinator.isActive(now)) return;
     this.lastAnalysisAt = now.getTime();
 
     const recovered = await this.pairs.recoverStale(
@@ -237,10 +252,13 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     return mergeNeighbours(
       position.mmsi,
       memory,
-      stored.map(({ state, distanceM }): CandidateNeighbour => ({
-        fix: state satisfies CandidateFix,
-        distanceM,
-      })),
+      stored
+        // The same rule as in memory: zones of the neighbour's own organization only.
+        .filter(({ state }) => this.isCandidate(context, state))
+        .map(({ state, distanceM }): CandidateNeighbour => ({
+          fix: state satisfies CandidateFix,
+          distanceM,
+        })),
     );
   }
 
@@ -251,6 +269,7 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     now: Date,
   ): Promise<void> {
     const { config } = context;
+    const key = transhipmentKey(pair.mmsiA, pair.mmsiB);
     try {
       const to = pair.lastSeenAt;
       const from = new Date(to.getTime() - config.ROUTE_WINDOW_MIN * 60_000);
@@ -276,19 +295,29 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
         checkDurationMs: config.CHECK_DURATION_MIN * 60_000,
         accuracyThreshold: config.ACCURACY_THRESHOLD,
       });
+      const result = { ...serialize(detection), ...sizes };
       if (detection.isIllegal) {
-        await this.raise(context, pair, detection, route1, route2);
+        const positive = await this.coordinator.exclusive(key, () =>
+          this.raise(context, pair, detection, route1, route2, now),
+        );
+        const completed = await this.pairs.complete(
+          pair,
+          { outcome: 'analysed', result, positive },
+          now,
+        );
+        if (!completed)
+          context.logger.warn(
+            `Claim of ${pair.mmsiA}-${pair.mmsiB} expired during its analysis: result discarded (the new claim analyses again)`,
+          );
       } else {
-        await context.alerts.resolve(transhipmentKey(pair.mmsiA, pair.mmsiB), {
-          at: pair.lastSeenAt,
-          reason: 'analysis no longer positive',
-        });
+        await this.coordinator.exclusive(key, () =>
+          context.alerts.resolve(key, {
+            at: pair.lastSeenAt,
+            reason: 'analysis no longer positive',
+          }),
+        );
+        await this.pairs.complete(pair, { outcome: 'analysed', result }, now);
       }
-      await this.pairs.complete(
-        pair,
-        { outcome: 'analysed', result: { ...serialize(detection), ...sizes } },
-        now,
-      );
       this.metrics.analysed(detection.isIllegal ? 'illegal' : 'clean');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -300,14 +329,19 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     }
   }
 
+  /**
+   * Raises (or keeps open) the pair's occurrence and returns the analysis
+   * as a result row of that occurrence (legacy `IllegalTranshipmentResult`).
+   */
   private async raise(
     context: DetectorContext<TranshipmentConfig>,
     pair: ClaimedPair,
     detection: Extract<TranshipmentDetection, { isIllegal: true }>,
     route1: readonly TrackFix[],
     route2: readonly TrackFix[],
-  ): Promise<void> {
-    const { config, fleet } = context;
+    now: Date,
+  ): Promise<TranshipmentResultRecord> {
+    const { config } = context;
     const middle = new Date(
       (detection.startTimestamp.getTime() + detection.endTimestamp.getTime()) /
         2,
@@ -317,14 +351,16 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     const position =
       fix1 === undefined || fix2 === undefined ? null : midpoint(fix1, fix2);
     const [mmsiA, mmsiB] = pairOf(pair.mmsiA, pair.mmsiB);
+    const key = transhipmentKey(mmsiA, mmsiB);
+    const severity = transhipmentSeverity(
+      detection.accuracy,
+      config.CRITICAL_ACCURACY,
+    );
 
     await context.alerts.raise({
       type: TRANSHIPMENT_ALERT,
-      dedupKey: transhipmentKey(mmsiA, mmsiB),
-      severity: transhipmentSeverity(
-        detection.accuracy,
-        config.CRITICAL_ACCURACY,
-      ),
+      dedupKey: key,
+      severity,
       mmsi: mmsiA,
       relatedMmsi: mmsiB,
       title: `Suspected transhipment between ${mmsiA} and ${mmsiB}`,
@@ -335,6 +371,7 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
       position,
       occurredAt: detection.startTimestamp,
       methodId: TRANSHIPMENT_EVENT_METHOD,
+      // No organization ids: an org viewer of one vessel must not learn who owns the other (spec §8.5).
       data: {
         ...serialize(detection),
         accuracyThreshold: config.ACCURACY_THRESHOLD,
@@ -343,11 +380,31 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
         lastDistanceM: pair.lastDistanceM,
         route1Points: route1.length,
         route2Points: route2.length,
-        orgId: fleet.orgOf(mmsiA) ?? null,
-        relatedOrgId: fleet.orgOf(mmsiB) ?? null,
         methodIds: [...this.methodIds],
       },
     });
+    const occurrence = context.alerts.get(key);
+    if (occurrence === undefined)
+      throw new Error(`The occurrence ${key} is not open after its raise`);
+    return {
+      id: newId(),
+      eventId: occurrence.alertId,
+      mmsiA,
+      mmsiB,
+      detectedAt: now,
+      startAt: detection.startTimestamp,
+      endAt: detection.endTimestamp,
+      accuracy: detection.accuracy,
+      averagePriority: detection.averagePriority,
+      priorityDistribution: { ...detection.priorityDistribution },
+      severity,
+      position,
+      accumulatedPriority: pair.priority,
+      observations: pair.observations,
+      route1Points: route1.length,
+      route2Points: route2.length,
+      methodId: TRANSHIPMENT_EVENT_METHOD,
+    };
   }
 
   /** Resolves open occurrences of pairs no longer observed together. */
@@ -373,11 +430,13 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
       );
       const seen = lastSeen.get(pairMapKey(mmsiA, mmsiB)) ?? alert.lastSeenAt;
       if (reference.getTime() - seen.getTime() > expiryMs) {
-        await context.alerts.resolve(alert.dedupKey, {
-          at: reference,
-          reason: 'pair no longer observed together',
-          data: { lastSeenAt: seen.toISOString() },
-        });
+        await this.coordinator.exclusive(alert.dedupKey, () =>
+          context.alerts.resolve(alert.dedupKey, {
+            at: reference,
+            reason: 'pair no longer observed together',
+            data: { lastSeenAt: seen.toISOString() },
+          }),
+        );
       }
     }
   }
