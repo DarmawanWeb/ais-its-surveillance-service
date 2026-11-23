@@ -5,7 +5,7 @@ import {
 } from '@darmawanweb/ais-its-nest/analytics';
 import { describe, expect, it } from 'vitest';
 
-import { LocalAlertCoordinator } from '../shared/__testing__/local-alert-coordinator.js';
+import { DirectAlertKeyLock } from '../shared/__testing__/direct-alert-key-lock.js';
 import {
   MemoryTracks,
   MemoryVesselStates,
@@ -42,18 +42,20 @@ function zigzag(minutes: number, fromMinute = 0): TestPositionInput[] {
   }));
 }
 
-function setup(env: Record<string, string> = {}, tracks = new MemoryTracks()) {
+function setup(
+  env: Record<string, string> = {},
+  tracks = new MemoryTracks(),
+  lock = new DirectAlertKeyLock(),
+) {
   const recorder = new VesselStateRecorder(new MemoryVesselStates(), {
     writeIntervalMs: 60_000,
   });
   const harness = DetectorTestHarness.create({
-    detectors: [
-      new FishingDetector(recorder, tracks, new LocalAlertCoordinator()),
-    ],
+    detectors: [new FishingDetector(recorder, tracks, lock)],
     env,
     now: START,
   });
-  return { harness, tracks };
+  return { harness, tracks, lock };
 }
 
 describe('FishingDetector', () => {
@@ -79,6 +81,31 @@ describe('FishingDetector', () => {
       data: { zoneKind: 'fishing_ground', positions: 11, durationMin: 30 },
     });
     expect(tracks.points.get(MMSI)?.size).toBe(11);
+  });
+
+  it('opens an occurrence through the key lock, never from a position older than its last end', async () => {
+    const lock = new DirectAlertKeyLock();
+    const { harness } = setup({}, new MemoryTracks(), lock);
+    const zone = await harness.zone({
+      kind: 'fishing_ground',
+      name: 'WPP 713',
+      geometry: GROUND,
+    });
+    const key = fishingKey(MMSI, zone.id);
+    // Another instance ended the occurrence at minute 31 (it handled newer fixes).
+    lock.endedAt.set(key, at(31));
+    await harness.track(zigzag(30));
+    expect(lock.keys).toEqual([key]);
+    expect(harness.alerts).toEqual([]);
+
+    // A newer fix opens it (the staleness check uses the position, not the run start).
+    await harness.track(zigzag(3, 33).slice(0, 1));
+    expect(harness.alerts).toEqual([
+      expect.objectContaining({
+        dedupKey: key,
+        occurredAt: at(0).toISOString(),
+      }),
+    ]);
   });
 
   it('is critical in a restricted zone', async () => {
@@ -152,5 +179,40 @@ describe('FishingDetector', () => {
     await restarted.harness.zone({ kind: 'fishing_ground', geometry: GROUND });
     await restarted.harness.track(zigzag(6, 27));
     expect(restarted.harness.alertsOf('fishing')).toHaveLength(1);
+  });
+
+  it("rebuilds the run from the stored track after a takeover (the other instance's fixes count)", async () => {
+    const { harness, tracks } = setup();
+    await harness.zone({ kind: 'fishing_ground', geometry: GROUND });
+    await harness.track(zigzag(9)); // minutes 0–9 in this instance's run
+    await harness.deactivate();
+    // The other instance handled minutes 12–27 and stored them.
+    for (const fix of zigzag(15, 12).map((fix, index) => ({
+      ...fix,
+      lat: -5.8 + (index + 4) * 0.0005,
+    })))
+      await tracks.append({
+        ...fix,
+        time: fix.time ?? START,
+        source: 'primary',
+        sog: fix.sog ?? 0,
+        cog: fix.cog ?? 0,
+        hdg: 511,
+        navstatus: 0,
+        predictedNavstatus: 0,
+        coastDistanceM: null,
+        previous: null,
+      });
+    await harness.activate();
+    await harness.track(zigzag(3, 30).slice(0, 1));
+    expect(harness.alertsOf('fishing')).toEqual([
+      expect.objectContaining({
+        occurredAt: at(0).toISOString(),
+        data: expect.objectContaining({
+          durationMin: 30,
+          messageKey: 'surveillance.fishing.loitering',
+        }) as unknown,
+      }),
+    ]);
   });
 });

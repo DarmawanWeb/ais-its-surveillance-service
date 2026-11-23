@@ -2,11 +2,10 @@ import type {
   AlertSeverity,
   SurveillanceEventStatus,
 } from '@darmawanweb/ais-its-contracts/domain';
-import { type Database, InjectDb } from '@darmawanweb/ais-its-nest/db';
+import { type Database, InjectDb, rowDate } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
 import { type SQL, sql } from 'drizzle-orm';
 
-import { type RawTimestamp, rowDate } from '../../db/rows.js';
 import type * as schema from '../../db/schema.js';
 import {
   type EventVisibility,
@@ -42,11 +41,13 @@ export interface StoredTranshipmentResult {
 /** Filters of {@link TranshipmentResultsRepository.list}. */
 export interface TranshipmentResultFilters {
   readonly visibility: EventVisibility;
-  /** Window start (`start_at`) range. */
-  readonly from: Date;
-  readonly to: Date;
+  /** Window start (`start_at`) range; unbounded when absent. */
+  readonly from?: Date | undefined;
+  readonly to?: Date | undefined;
   /** Only pairs with this vessel. */
   readonly mmsi?: number | undefined;
+  /** Only the analyses of this event (`event_id`). */
+  readonly eventId?: string | undefined;
 }
 
 /** Position of the last row of a page (`start_at` DESC, `id` DESC). */
@@ -62,9 +63,9 @@ interface ResultRow extends Record<string, unknown> {
   mmsi_b: number;
   name_a: string | null;
   name_b: string | null;
-  start_at: RawTimestamp;
-  end_at: RawTimestamp;
-  detected_at: RawTimestamp;
+  start_at: Date | string;
+  end_at: Date | string;
+  detected_at: Date | string;
   accuracy: number;
   average_priority: number;
   priority_distribution: StoredTranshipmentResult['priorityDistribution'];
@@ -88,9 +89,13 @@ export class TranshipmentResultsRepository {
   ): Promise<StoredTranshipmentResult[]> {
     const conditions: SQL[] = [
       visibleEvents(filters.visibility, sql`r.mmsi_a`, sql`r.mmsi_b`),
-      sql`r.start_at >= ${filters.from}`,
-      sql`r.start_at <= ${filters.to}`,
     ];
+    if (filters.from !== undefined)
+      conditions.push(sql`r.start_at >= ${filters.from}`);
+    if (filters.to !== undefined)
+      conditions.push(sql`r.start_at <= ${filters.to}`);
+    if (filters.eventId !== undefined)
+      conditions.push(sql`r.event_id = ${filters.eventId}::uuid`);
     if (filters.mmsi !== undefined)
       conditions.push(
         sql`(r.mmsi_a = ${filters.mmsi} OR r.mmsi_b = ${filters.mmsi})`,

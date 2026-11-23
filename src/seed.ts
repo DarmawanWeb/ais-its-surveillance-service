@@ -6,6 +6,7 @@ import {
 import {
   createDatabasePool,
   databasePoolSettings,
+  sanitizeError,
 } from '@darmawanweb/ais-its-nest/db';
 import { drizzle } from 'drizzle-orm/node-postgres';
 
@@ -25,7 +26,10 @@ const logger = createLogger({
   service: `${config.SERVICE_NAME}-seed`,
 });
 const pool = createDatabasePool(databasePoolSettings(config), (error) => {
-  logger.error({ err: error }, 'Idle database connection failed');
+  logger.error(
+    { err: sanitizeError(error) },
+    'Idle database connection failed',
+  );
 });
 try {
   const records = await readLegacyViolations();
@@ -35,7 +39,7 @@ try {
   );
   logger.info(report, 'Seeded fishing_violations');
 } catch (error) {
-  logger.error({ err: error }, 'Seed failed');
+  logger.error({ err: sanitizeError(error) }, 'Seed failed');
   process.exitCode = 1;
 } finally {
   await pool.end();

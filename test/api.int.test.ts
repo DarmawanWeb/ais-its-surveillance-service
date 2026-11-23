@@ -5,14 +5,13 @@ import {
   parseEnvelope,
   subjects,
 } from '@darmawanweb/ais-its-contracts/events';
-import { ALERT_PERSISTENCE } from '@darmawanweb/ais-its-nest/analytics';
 import { type Database, DRIZZLE_DB } from '@darmawanweb/ais-its-nest/db';
 import { NatsClient } from '@darmawanweb/ais-its-nest/nats';
 import { waitFor } from '@darmawanweb/ais-its-nest/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import type * as schema from '../src/db/schema.js';
-import type { DetectorEventsRepository } from '../src/detectors/detector-events.repository.js';
+import { DetectorEventsRepository } from '../src/detectors/detector-events.repository.js';
 import {
   readLegacyViolations,
   seedFishingViolations,
@@ -64,6 +63,9 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
     anomalyX: newId(),
   };
   const resultId = newId();
+  /** An older analysis of the same occurrence (outside the 30-day default range). */
+  const oldResultId = newId();
+  const zoneId = newId();
 
   /** An alert as the Detector SDK would persist it. */
   function alert(
@@ -111,9 +113,7 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
       return rows.length === 2 ? true : undefined;
     });
 
-    const events = service.app.get<unknown, DetectorEventsRepository>(
-      ALERT_PERSISTENCE,
-    );
+    const events = service.app.get(DetectorEventsRepository);
     await events.onRaised(
       alert(
         {
@@ -123,6 +123,7 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
           severity: 'critical',
           lat: -11.01,
           lon: 131.01,
+          zoneId,
         },
         0,
       ),
@@ -180,6 +181,22 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
         new Date(T0),
         new Date(T0 + 30 * 60_000),
         new Date(T0 + 40 * 60_000),
+        Math.min(vesselA, vesselB),
+        Math.max(vesselA, vesselB),
+        ids.transhipmentAB,
+      ],
+    );
+    await fixtures.rows(
+      `INSERT INTO transhipment_results
+         (id, start_at, end_at, detected_at, mmsi_a, mmsi_b, event_id, accuracy,
+          average_priority, priority_distribution, severity,
+          accumulated_priority, observations, route1_points, route2_points, method_id)
+       VALUES ($1, $2, $3, $3, $4, $5, $6, 75, 12, '{"low":10,"medium":40,"high":50}',
+               'warning', 120, 10, 30, 30, 'transhipment.accuracy')`,
+      [
+        oldResultId,
+        new Date(T0 - 30 * 24 * 60 * 60_000),
+        new Date(T0 - 30 * 24 * 60 * 60_000 + 30 * 60_000),
         Math.min(vesselA, vesselB),
         Math.max(vesselA, vesselB),
         ids.transhipmentAB,
@@ -423,9 +440,7 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
       headers: reviewer,
       payload: { status: 'dismissed' },
     });
-    const events = service.app.get<unknown, DetectorEventsRepository>(
-      ALERT_PERSISTENCE,
-    );
+    const events = service.app.get(DetectorEventsRepository);
     const [open] = (await events.loadOpen()).filter(
       (occurrence) => occurrence.alertId === ids.geofenceA,
     );
@@ -443,8 +458,61 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
     expect(response.json()).toMatchObject({
       status: 'dismissed',
       resolvedAt: expect.any(String) as string,
-      resolution: { reason: 'left the zone' },
+      // The stable code is stored with the English reason.
+      resolution: { reason: 'left the zone', code: 'left_zone' },
+      // Written without a message key: derived on read from the row.
+      data: {
+        messageKey: 'surveillance.geofence.entered',
+        messageParams: { mmsi: vesselA, vesselName: 'KM Alpha' },
+      },
     });
+  });
+
+  it('filters by detector lifecycle (active), zone and vessel search', async () => {
+    const idsOf = async (query: string): Promise<string[]> => {
+      const response = await get(`${BASE}/events?bbox=${BBOX}&${query}`, {
+        roles: ['authority'],
+      });
+      expect(response.statusCode).toBe(200);
+      return response.json<Page<EventBody>>().data.map((event) => event.id);
+    };
+    // geofenceA was resolved by the previous test; the others are still open.
+    expect(await idsOf('active=false')).toEqual([ids.geofenceA]);
+    expect(await idsOf('active=true')).toEqual([
+      ids.anomalyX,
+      ids.transhipmentAB,
+      ids.darkB,
+    ]);
+    expect(await idsOf(`zoneId=${zoneId}`)).toEqual([ids.geofenceA]);
+    // Name of either vessel (case-insensitive) or the digits of an MMSI.
+    expect(await idsOf('q=bRaVo')).toEqual([ids.transhipmentAB, ids.darkB]);
+    expect(await idsOf(`q=${unregistered}`)).toEqual([ids.anomalyX]);
+    // LIKE wildcards are matched literally.
+    expect(await idsOf('q=%25%25')).toEqual([]);
+    expect(await idsOf('q=k_')).toEqual([]);
+    // Tenancy still applies to a search.
+    const orgA = await get(`${BASE}/events?bbox=${BBOX}&q=bravo`, {
+      roles: ['viewer'],
+      orgId: ORG_A,
+    });
+    expect(orgA.json<Page<EventBody>>().data.map((event) => event.id)).toEqual([
+      ids.transhipmentAB,
+    ]);
+
+    // `q` is validated trimmed: a blank search is refused, never ignored.
+    for (const invalid of [
+      'q=a',
+      'q=%20%20',
+      'q=%20a%20',
+      'zoneId=zone-1',
+      'active=yes',
+    ]) {
+      const response = await get(`${BASE}/events?${invalid}`, {
+        roles: ['authority'],
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
+    }
   });
 
   it('returns transhipments in the legacy result shape', async () => {
@@ -481,6 +549,28 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
       orgId: newId(),
     });
     expect(other.json<Page<unknown>>().data).toEqual([]);
+  });
+
+  it('lists every analysis of one event, whatever its window, with eventId', async () => {
+    const resultIds = async (query: string) =>
+      (await get(`${BASE}/transhipments?${query}`, { roles: ['authority'] }))
+        .json<Page<{ id: string; eventId: string }>>()
+        .data.map((result) => result.id);
+    expect(await resultIds(`eventId=${ids.transhipmentAB}`)).toEqual([
+      resultId,
+      oldResultId,
+    ]);
+    // An explicit range still applies.
+    expect(
+      await resultIds(
+        `eventId=${ids.transhipmentAB}&from=${new Date(T0 - 60_000).toISOString()}`,
+      ),
+    ).toEqual([resultId]);
+    expect(await resultIds(`eventId=${newId()}`)).toEqual([]);
+    const invalid = await get(`${BASE}/transhipments?eventId=x`, {
+      roles: ['authority'],
+    });
+    expect(invalid.statusCode).toBe(400);
   });
 
   it('aggregates a heatmap with ST_SnapToGrid, respecting tenancy', async () => {
@@ -530,6 +620,181 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
     });
   });
 
+  it('returns a time series of counts per hour or local day in one request', async () => {
+    interface Series {
+      readonly from: string;
+      readonly to: string;
+      readonly bucket: string;
+      readonly timeZone: string;
+      readonly buckets: {
+        readonly from: string;
+        readonly to: string;
+        readonly total: number;
+        readonly byType: Record<string, number>;
+        readonly bySeverity: Record<string, number>;
+      }[];
+    }
+    const from = new Date(T0 - 60_000).toISOString();
+    const to = new Date(T0 + 20 * 60_000).toISOString();
+    const series = async (
+      query: string,
+      claims: Parameters<TestService['authorization']>[0] = {
+        roles: ['authority'],
+      },
+    ): Promise<Series> => {
+      const response = await get(
+        `${BASE}/stats/series?from=${from}&to=${to}&${query}`,
+        claims,
+      );
+      expect(response.statusCode).toBe(200);
+      return response.json<Series>();
+    };
+    const sum = (
+      body: Series,
+      pick: (bucket: Series['buckets'][number]) => number,
+    ) => body.buckets.reduce((total, bucket) => total + pick(bucket), 0);
+
+    const hourly = await series('bucket=hour');
+    expect(hourly).toMatchObject({ from, to, bucket: 'hour', timeZone: 'UTC' });
+    expect(hourly.buckets[0]?.from).toBe(from);
+    expect(hourly.buckets.at(-1)?.to).toBe(to);
+    // Contiguous buckets that add up to the counts of GET /stats.
+    for (const [index, bucket] of hourly.buckets.entries()) {
+      expect(Date.parse(bucket.from)).toBeLessThan(Date.parse(bucket.to));
+      const next = hourly.buckets[index + 1];
+      if (next !== undefined) expect(next.from).toBe(bucket.to);
+    }
+    expect(sum(hourly, (bucket) => bucket.total)).toBe(4);
+    expect(sum(hourly, (bucket) => bucket.byType.dark ?? 0)).toBe(1);
+    expect(sum(hourly, (bucket) => bucket.bySeverity.critical ?? 0)).toBe(1);
+
+    // Local days of WIB (UTC+7) start at 17:00 UTC; tenancy as /stats.
+    const daily = await series('bucket=day&tz=Asia/Jakarta&type=dark', {
+      roles: ['viewer'],
+      orgId: ORG_B,
+    });
+    expect(sum(daily, (bucket) => bucket.total)).toBe(1);
+    for (const bucket of daily.buckets.slice(1))
+      expect(bucket.from).toMatch(/T17:00:00\.000Z$/);
+
+    const tooMany = await get(
+      `${BASE}/stats/series?from=${new Date(T0 - 60 * 24 * 60 * 60_000).toISOString()}&to=${to}&bucket=hour`,
+      { roles: ['authority'] },
+    );
+    expect(tooMany.statusCode).toBe(400);
+    expect(tooMany.json()).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      errors: [expect.objectContaining({ field: 'bucket' })],
+    });
+    // UTC offsets are refused (PostgreSQL would read `+07:00` as UTC-07:00),
+    // and so are zones ICU knows but the database's tzdata dropped: 400 on
+    // `tz`, never a 500 from the query.
+    for (const tz of [
+      'Mars/Base',
+      '+07:00',
+      '-03:00',
+      'US/Pacific-New',
+      'Canada/East-Saskatchewan',
+    ]) {
+      const badZone = await get(
+        `${BASE}/stats/series?tz=${encodeURIComponent(tz)}`,
+        { roles: ['authority'] },
+      );
+      expect(badZone.statusCode, tz).toBe(400);
+      expect(badZone.json(), tz).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        errors: [expect.objectContaining({ field: 'tz' })],
+      });
+    }
+    // Names in any case, echoed in the database's spelling; Etc/GMT-7 is UTC+7.
+    const lowerCase = await series('bucket=day&tz=asia/jakarta');
+    expect(lowerCase.timeZone).toBe('Asia/Jakarta');
+    const threeDays = await get(
+      `${BASE}/stats/series?from=${new Date(T0 - 3 * 24 * 60 * 60_000).toISOString()}&to=${to}&bucket=day&tz=Etc/GMT-7`,
+      { roles: ['authority'] },
+    );
+    expect(threeDays.statusCode).toBe(200);
+    const etc = threeDays.json<Series>();
+    expect(etc.timeZone).toBe('Etc/GMT-7');
+    expect(etc.buckets.length).toBeGreaterThan(2);
+    for (const bucket of etc.buckets.slice(1))
+      expect(bucket.from).toMatch(/T17:00:00\.000Z$/);
+  });
+
+  it('follows daylight saving time: a repeated hour is two buckets, a skipped hour none', async () => {
+    const events = service.app.get(DetectorEventsRepository);
+    const mmsi = uniqueMmsi();
+    // Europe/Berlin: 2025-10-26 03:00 CEST → 02:00 CET and 2026-03-29
+    // 02:00 CET → 03:00 CEST, both at 01:00 UTC.
+    const times = [
+      '2025-10-26T00:30:00.000Z', // 02:30 CEST
+      '2025-10-26T01:30:00.000Z', // 02:30 CET (the repeated hour)
+      '2026-03-29T00:30:00.000Z', // 01:30 CET
+      '2026-03-29T01:30:00.000Z', // 03:30 CEST (02:xx does not exist)
+    ];
+    for (const occurredAt of times)
+      await events.onRaised(
+        { ...alert({ id: newId(), type: 'fishing', mmsi }, 0), occurredAt },
+        'raised',
+      );
+    interface Bucket {
+      readonly from: string;
+      readonly to: string;
+      readonly total: number;
+    }
+    const buckets = async (query: string): Promise<Bucket[]> => {
+      const response = await get(
+        `${BASE}/stats/series?type=fishing&tz=Europe/Berlin&${query}`,
+        { roles: ['authority'] },
+      );
+      expect(response.statusCode).toBe(200);
+      return response.json<{ buckets: Bucket[] }>().buckets;
+    };
+    const shape = (list: Bucket[]) =>
+      list.map(({ from, to, total }) => [
+        from.slice(11, 16),
+        to.slice(11, 16),
+        total,
+      ]);
+
+    // 01:00 CEST, 02:00 CEST, 02:00 CET: three hours of 60 minutes.
+    expect(
+      shape(
+        await buckets(
+          'bucket=hour&from=2025-10-25T23:00:00.000Z&to=2025-10-26T02:00:00.000Z',
+        ),
+      ),
+    ).toEqual([
+      ['23:00', '00:00', 0],
+      ['00:00', '01:00', 1],
+      ['01:00', '02:00', 1],
+    ]);
+    // 00:00 CET, 01:00 CET, 03:00 CEST: each event counted once.
+    expect(
+      shape(
+        await buckets(
+          'bucket=hour&from=2026-03-28T23:00:00.000Z&to=2026-03-29T02:00:00.000Z',
+        ),
+      ),
+    ).toEqual([
+      ['23:00', '00:00', 0],
+      ['00:00', '01:00', 1],
+      ['01:00', '02:00', 1],
+    ]);
+    // 26 October 2025 in Berlin is 25 hours long.
+    const [day, next] = await buckets(
+      'bucket=day&from=2025-10-25T22:00:00.000Z&to=2025-10-27T22:00:00.000Z',
+    );
+    expect(day).toEqual({
+      from: '2025-10-25T22:00:00.000Z',
+      to: '2025-10-26T23:00:00.000Z',
+      total: 2,
+      byType: { fishing: 2 },
+      bySeverity: { warning: 2 },
+    });
+    expect(next).toMatchObject({ from: '2025-10-26T23:00:00.000Z', total: 0 });
+  });
+
   it('seeds the historical fishing violations idempotently and serves them', async () => {
     const db = service.app.get<unknown, Database<typeof schema>>(DRIZZLE_DB);
     const records = await readLegacyViolations();
@@ -568,6 +833,32 @@ describe('surveillance API: events, review, tenancy, heatmap, stats, seeds', () 
     expect(
       near.every((record) => record.lon >= 103.9 && record.lon <= 104.3),
     ).toBe(true);
+
+    // Year facets and the historical heat layer, without paging the records.
+    const years = await get(`${BASE}/fishing-violations/years`, {
+      roles: ['viewer'],
+    });
+    expect(years.statusCode).toBe(200);
+    const facets = years.json<{
+      years: { year: number; count: number }[];
+      total: number;
+    }>();
+    expect(facets.total).toBe(403);
+    expect(facets.years).toContainEqual({ year: 2016, count: 163 });
+    expect(facets.years.map((entry) => entry.year)).toEqual(
+      [...facets.years.map((entry) => entry.year)].sort((a, b) => a - b),
+    );
+    const heat = await get(
+      `${BASE}/fishing-violations/heatmap?year=2016&cellKm=50`,
+      { roles: ['viewer'] },
+    );
+    expect(heat.statusCode).toBe(200);
+    expect(heat.json()).toMatchObject({ year: 2016, cellKm: 50, total: 163 });
+    const local = await get(
+      `${BASE}/fishing-violations/heatmap?bbox=103.9,0.3,104.3,0.6&cellKm=5`,
+      { roles: ['viewer'] },
+    );
+    expect(local.json<{ total: number }>().total).toBe(near.length);
   });
 
   it('requires surveillance:read', async () => {

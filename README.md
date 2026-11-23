@@ -12,7 +12,8 @@ service, §18 for the Detector SDK) in the central repository
 ## Purpose and responsibilities
 
 - Runs five **detectors** on the live AIS position feed and turns their findings into persisted
-  **events** and `alert.raised.v1` alerts (domain `surveillance`) for the notification service.
+  **events**, `alert.raised.v1` alerts (domain `surveillance`) and, when a condition ends,
+  `alert.resolved.v1` resolutions for the notification service (which closes the inbox alert).
 - Replaces the legacy illegal-transhipment pipeline (Mongo queue + forked polling worker) with
   PostGIS candidate search, a PostgreSQL queue and a scheduled analyser, keeping the legacy
   scoring and detection **numerically identical** (golden tests).
@@ -42,7 +43,7 @@ flowchart LR
     RUNNER["DetectorRunner (SDK)<br/>VesselStateStore · PairSearch · ZoneIndex · FleetDirectory"]
     DET["detectors<br/>transhipment · anomaly · dark · geofence · fishing"]
     EMIT["AlertEmitter<br/>dedupKey · cool-down · escalation"]
-    COORD["AlertCoordinator<br/>replica alert state (reload · advisory lock)"]
+    LOCK["AlertKeyLock<br/>tick alert operations · new occurrences of positions<br/>(withKey · advisory lock)"]
     PROJ["ProjectionsConsumer"]
     API["REST /api/v2/surveillance/*<br/>controller → service → repository"]
   end
@@ -62,17 +63,20 @@ flowchart LR
   FLEET -- "durable surveillance-fleet" --> PROJ
   RUNNER --> DET
   DET --> VS & TP & PAIRS & TR
-  DET --> COORD --> EMIT
-  COORD -- "open occurrences" --> EV
+  DET --> EMIT
+  DET -- "ticks · raises that publish" --> LOCK --> EMIT
+  LOCK -- "align the key" --> EV
+  RUNNER -- "activation: loadOpen" --> EV
   EMIT -- "persist first (AlertPersistence)" --> EV
-  EMIT -- "alert.raised.v1" --> ALERTS
+  EMIT -- "alert.raised.v1 · alert.resolved.v1" --> ALERTS
   PROJ --> PZ
   API --> EV & PZ & FV & PAIRS & TR
   API -- "audit.recorded.v1 (review)" --> AUDIT
 ```
 
 - **Boot** (kit lifecycle rule): connect, migrate and ensure the produced streams (`ALERTS`,
-  `AUDIT`) in `onModuleInit` → the SDK restores open occurrences from `events` (`loadOpen`),
+  `AUDIT`) in `onModuleInit` → the SDK restores open occurrences from `events` (`loadOpen`, again
+  on every activation),
   loads the complete `GEO` and `FLEET` snapshots into memory, then starts the position consumer,
   the ticks and the projections → the port opens. On `SIGTERM` readiness turns `503`, consumers
   drain, NATS drains and the pool closes.
@@ -81,46 +85,77 @@ flowchart LR
   or times out is logged and counted and never blocks the others or redelivers the message.
   Positions go to **one active instance** (`exclusive`), further replicas are hot standbys;
   scale out by splitting detectors over deployments with `DETECTORS`.
-- **Replicas** (`src/detectors/shared/alert-coordinator.ts`, a workaround of the kit, see
-  _Operations_): every detector reports each position to the `AlertCoordinator` first. The first
-  position after a pause of more than 15 s (half the 30 s pinned TTL, so every takeover) or after
-  startup reloads the open occurrences from `events` into the SDK `AlertEmitter` before any
-  detector handles it: a new active instance adopts what the previous one opened and drops what it
-  ended.
+- **Failover** (Detector SDK of `@darmawanweb/ais-its-nest` 0.3): an instance starts inactive
+  and becomes active with its first position after the server pinned it. Before that position is
+  handled the SDK settles running calls, publishes pending resolutions, reloads the open
+  occurrences from `events` (`loadOpen`, replace semantics: what the previous instance opened is
+  taken over, what it ended is dropped) and runs each detector's `onActivated`: transhipment
+  restarts its cold-start window (neighbours also from `vessel_state`) and analyses at the first
+  tick, anomaly reloads its streaks from `vessel_state`, fishing rebuilds its runs from
+  `track_points`, geofence ends the occurrences of zones deleted or no longer alerting while no
+  instance was active, and dark scans at the first tick. A graceful stop publishes pending
+  resolutions and releases the pin, so a standby takes over at once (rolling updates).
 - **Ticks**: the transhipment analyser (every `TRANSHIPMENT_ANALYSIS_INTERVAL_S`) and the dark
-  scan (every `DARK_CHECK_INTERVAL_S`) run on timers between positions, **only on the instance
-  consuming positions** (one handled within the last 2 min); their raises and resolutions run
-  under a per-`dedupKey` PostgreSQL advisory lock after aligning the key with `events`, so two
-  replicas never open one occurrence twice.
+  scan (every `DARK_CHECK_INTERVAL_S`) run on timers between positions, **only on the active
+  instance** (the SDK gates them). Their raises and resolutions run through the `AlertKeyLock`
+  (`src/detectors/shared/alert-key-lock.ts`): inside the key's `AlertEmitter.withKey` turn it
+  takes a per-`dedupKey` PostgreSQL advisory lock and aligns the key with `events` (`replaceOpen`
+  adopts an occurrence another instance opened, `forget` drops one it ended) before acting, so
+  even a former active instance that still ticks (cut off from NATS, see _Operations_) never
+  opens one occurrence twice. Zone changes reach every instance; only the active one ends
+  geofence occurrences (`context.isActive()`).
+- **Position transitions**: a position-driven raise that would publish — a new occurrence or an
+  escalation of geofence, anomaly or fishing — runs through `AlertKeyLock.raiseFromPosition`:
+  under the key's lock the key is aligned with `events` first, so an instance that resumes after
+  a pause longer than the pinned TTL (`SIGSTOP`, a blocked event loop) and still handles the
+  positions it had buffered adopts the occurrence the instance that took over opened instead of
+  opening a second one; a key without an open occurrence is raised only when its latest
+  occurrence ended before the position (`resolved_at` < position time), so a stale buffered
+  position never reopens what the other instance already ended. Signals of an open occurrence
+  that do not escalate, and resolutions, take no lock. The kit does not re-check the pin of
+  messages buffered across such a pause (see _Operations_, _Platform issues_).
+- **Resolutions** are published as `alert.resolved.v1` on the raise's subject once the alert
+  cooldown (`ALERT_COOLDOWN_MIN`, 10 min) since the occurrence's last publication has passed — at
+  once when it has, else by the SDK's 30 s housekeeping — so an inbox alert closes at most the
+  cooldown after the condition ended; a re-raise within the cooldown cancels the pending
+  resolution (the occurrence is reopened, nothing is published). Each carries the stable
+  `data.code` of _Resolution codes_.
 
-| Path                                          | What                                                                                                                   |
-| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `src/domain/`                                 | pure rules with `@method` TSDoc (transhipment, anomaly, dark, geofence, fishing)                                       |
-| `src/detectors/<id>/`                         | one `@RegisterDetector()` class per detector, its config schema and tests                                              |
-| `src/detectors/shared/`                       | `vessel_state` / `track_points` storage ports, repositories, recorder and the `AlertCoordinator` (replica alert state) |
-| `src/detectors/detector-events.repository.ts` | SDK `AlertPersistence`: the `events` table                                                                             |
-| `src/consumers/`                              | durable `GEO` / `FLEET` projections into `zones` / `vessels`                                                           |
-| `src/modules/<feature>/`                      | events, transhipments, statistics, fishing-violations, methodology                                                     |
-| `src/tenancy/event-visibility.ts`             | spec §8.5 visibility of events as SQL                                                                                  |
-| `src/seed.ts`, `seeds/`                       | `pnpm seed`: historical fishing violations                                                                             |
-| `migrations/`                                 | forward-only SQL migrations (`0001_init.sql`, `0002_review_hardening.sql`)                                             |
-| `test/`                                       | integration tests against real containers                                                                              |
+| Path                                          | What                                                                                                              |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `src/domain/`                                 | pure rules with `@method` TSDoc (transhipment, anomaly, dark, geofence, fishing)                                  |
+| `src/domain/messages.ts`                      | message keys, English templates and resolution codes (_Messages_, _Resolution codes_)                             |
+| `src/detectors/<id>/`                         | one `@RegisterDetector()` class per detector, its config schema and tests                                         |
+| `src/detectors/shared/`                       | `vessel_state` / `track_points` storage ports, repositories, recorder and the `AlertKeyLock` (ticks, transitions) |
+| `src/detectors/detector-events.repository.ts` | SDK `AlertPersistence`: the `events` table (`loadOpen` with domain, method id and event times; `onRepeated`)      |
+| `src/detectors/detector-thresholds.ts`        | units and descriptions of the `<ID>_*` thresholds (`GET /detectors`)                                              |
+| `src/consumers/`                              | durable `GEO` / `FLEET` projections into `zones` / `vessels`                                                      |
+| `src/modules/<feature>/`                      | events, transhipments, statistics, fishing-violations, methodology                                                |
+| `src/tenancy/event-visibility.ts`             | spec §8.5 visibility of events as SQL                                                                             |
+| `src/seed.ts`, `seeds/`                       | `pnpm seed`: historical fishing violations                                                                        |
+| `migrations/`                                 | forward-only SQL migrations (`0001_init.sql`, `0002_review_hardening.sql`), resolved by `MIGRATIONS_DIR`          |
+| `test/`                                       | integration tests against real containers                                                                         |
 
 ## Detectors
 
-| Detector       | Trigger                                                                                                                                                            | Resolution                                                                                | Severity                                                                          | `dedupKey`                         | Event `methodId`             |
-| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------- | ---------------------------- |
-| `transhipment` | analysed pair reaches the legacy score threshold (70 %)                                                                                                            | later negative analysis, or pair not observed together for `TRANSHIPMENT_PAIR_EXPIRY_MIN` | `critical` when the score ≥ `TRANSHIPMENT_CRITICAL_ACCURACY` (90), else `warning` | `transhipment:<minMmsi>:<maxMmsi>` | `transhipment.accuracy`      |
-| `anomaly`      | `(predicted = 0 ∧ navstatus = 1) ∨ (predicted = 1 ∧ navstatus ≠ 1)` for `ANOMALY_MIN_POSITIONS` (3) consecutive positions                                          | first consistent position                                                                 | `info` (registry default)                                                         | `anomaly:<mmsi>`                   | `anomaly.navstatus_mismatch` |
-| `dark`         | last seen > `DARK_GAP_MIN` (30) min before the feed watermark, last SOG > 1 kn, > 5 km from any **global** `port` / `anchorage` zone (org-owned zones never count) | next position of the vessel                                                               | `warning` (registry default)                                                      | `dark:<mmsi>`                      | `dark.ais_gap`               |
-| `geofence`     | inside an active `restricted` / `mpa` / `custom` zone with `alertOnEnter` (buffer included), global zones for every vessel, organization zones for its own vessels | leaves the zone; zone deleted, deactivated or no longer alerting                          | `critical` for `GEOFENCE_CRITICAL_KINDS` (`restricted`), else `warning`           | `geofence:<mmsi>:<zoneId>`         | `geo.geofence_enter`         |
-| `fishing`      | ≥ 30 min, ≥ 6 fixes at 0.5–4 kn with a mean course-change rate ≥ 3 °/min (fixes ≥ 3 min apart, gaps ≤ 10 min) inside a `fishing_ground` / `restricted` zone        | leaves the zone, or `FISHING_RESOLVE_AFTER_MIN` without a qualifying fix                  | `critical` for `FISHING_CRITICAL_KINDS` (`restricted`), else `warning`            | `fishing:<mmsi>:<zoneId>`          | `fishing.loitering`          |
+| Detector       | Trigger                                                                                                                                                            | Resolution                                                                                                                         | Severity                                                                          | `dedupKey`                         | Event `methodId`             |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------- | ---------------------------- |
+| `transhipment` | analysed pair reaches the legacy score threshold (70 %)                                                                                                            | later negative analysis (`analysis_negative`), or pair not observed together for `TRANSHIPMENT_PAIR_EXPIRY_MIN` (`pair_separated`) | `critical` when the score ≥ `TRANSHIPMENT_CRITICAL_ACCURACY` (90), else `warning` | `transhipment:<minMmsi>:<maxMmsi>` | `transhipment.accuracy`      |
+| `anomaly`      | `(predicted = 0 ∧ navstatus = 1) ∨ (predicted = 1 ∧ navstatus ≠ 1)` for `ANOMALY_MIN_POSITIONS` (3) consecutive positions                                          | first consistent position (`navstatus_consistent`)                                                                                 | `info` (registry default)                                                         | `anomaly:<mmsi>`                   | `anomaly.navstatus_mismatch` |
+| `dark`         | last seen > `DARK_GAP_MIN` (30) min before the feed watermark, last SOG > 1 kn, > 5 km from any **global** `port` / `anchorage` zone (org-owned zones never count) | next position of the vessel (`ais_resumed`)                                                                                        | `warning` (registry default)                                                      | `dark:<mmsi>`                      | `dark.ais_gap`               |
+| `geofence`     | inside an active `restricted` / `mpa` / `custom` zone with `alertOnEnter` (buffer included), global zones for every vessel, organization zones for its own vessels | leaves the zone (`left_zone`); zone deleted (`zone_deleted`), deactivated or no longer alerting (`zone_no_longer_alerts`)          | `critical` for `GEOFENCE_CRITICAL_KINDS` (`restricted`), else `warning`           | `geofence:<mmsi>:<zoneId>`         | `geo.geofence_enter`         |
+| `fishing`      | ≥ 30 min, ≥ 6 fixes at 0.5–4 kn with a mean course-change rate ≥ 3 °/min (fixes ≥ 3 min apart, gaps ≤ 10 min) inside a `fishing_ground` / `restricted` zone        | leaves the zone (`left_zone`), or `FISHING_RESOLVE_AFTER_MIN` without a qualifying fix (`loitering_ended`)                         | `critical` for `FISHING_CRITICAL_KINDS` (`restricted`), else `warning`            | `fishing:<mmsi>:<zoneId>`          | `fishing.loitering`          |
 
 Alert semantics come from the SDK `AlertEmitter`: one open occurrence per `dedupKey`; a higher
 severity escalates (new alert id, the superseded row is ended), the same severity is unchanged, a
-lower one de-escalates silently; re-raising within `ALERT_COOLDOWN_MIN` (10) after a publication
-or a resolution is **suppressed** (the row is reopened, nothing is published). Every alert and
-event carries `methodId`, `dedupKey` and `zoneId` where relevant. Event `data` carries **no
+lower one de-escalates silently; a re-raise within `ALERT_COOLDOWN_MIN` (10) of the occurrence's
+last publication (its raise or escalation) is **suppressed** (the row is reopened, nothing is
+published, and its pending `alert.resolved.v1` is cancelled); a later re-raise — even right after
+the resolution — opens a new occurrence (the resolution is published first, then the new alert).
+The end of an occurrence is published as `alert.resolved.v1` after the cooldown (see
+_Architecture_). Every
+alert and event carries `methodId`, `dedupKey`, `zoneId` where relevant, and `data.messageKey` /
+`data.messageParams` for a localized title and message (see _Messages_). Event `data` carries **no
 organization ids**: ownership is derived at query time from the FLEET projection, so an
 organization's viewer of one vessel never learns who owns the other vessel of a pair (spec §8.5).
 Zones follow the tenancy of spec §8.5 too: rules that _raise_ (geofence, fishing, transhipment
@@ -144,7 +179,7 @@ organization's zone could only _silence_, uses global (curated) zones only.
    once (`last_seen_by_a_at` / `last_seen_by_b_at`: a position redelivered after a restart adds
    nothing), and a pending pair not observed within `TRANSHIPMENT_ROUTE_WINDOW_MIN` starts over,
    so brief encounters far apart never add up to the threshold.
-3. **Analyser** — on the instance consuming positions only, every run returns stale claims,
+3. **Analyser** — on the active instance only (an SDK tick), every run returns stale claims,
    claims up to `TRANSHIPMENT_ANALYSIS_BATCH`
    pending pairs with priority ≥ `TRANSHIPMENT_MIN_PRIORITY`, ordered `priority DESC, queued_at
 ASC` (legacy `getAllSorted`) with `FOR UPDATE SKIP LOCKED`, skipping pairs analysed within
@@ -160,7 +195,7 @@ ASC` (legacy `getAllSorted`) with `FOR UPDATE SKIP LOCKED`, skipping pairs analy
    legacy result shape. The first one opens the occurrence: an event at the window start with
    `data` `{ isIllegal, accuracy, startTimestamp, endTimestamp, averagePriority,
 priorityDistribution: { low, medium, high }, accumulatedPriority, observations, lastDistanceM,
-route1Points, route2Points, methodIds }`, located at the midpoint of the two vessels in the
+route1Points, route2Points, methodIds, messageKey, messageParams }`, located at the midpoint of the two vessels in the
    middle of the window; `mmsi` is the smaller, `relatedMmsi` the larger MMSI. Later positive
    analyses keep it open (or escalate it) and add results; a negative one resolves it.
 
@@ -176,7 +211,7 @@ mirrors them for drizzle.
 | `track_points`         | hypertable (1 day chunks), compressed after 2 days (`segmentby mmsi`), retention **7 days** | positions of transhipment candidates and of vessels inside fishing zones only                                                                                                                                                                                                                                                                                                                                                                                     |
 | `transhipment_pairs`   | table, PK `(mmsi_a, mmsi_b)` with `mmsi_a < mmsi_b`                                         | accumulated priority, status `pending → in_progress → completed / failed`, queue time, first/last observation and the last observation of each vessel, claim, analyses, last result / error; pairs not observed for 7 days are pruned (pending ones too)                                                                                                                                                                                                          |
 | `transhipment_results` | hypertable on `start_at` (30 day chunks), retention **2 years**, append-only                | every positive analysis: window `start_at`/`end_at`, `detected_at`, pair, `event_id` of the occurrence, accuracy, average priority, `priority_distribution`, severity, `geography(Point)`, accumulated priority, observations, route sizes, `method_id`                                                                                                                                                                                                           |
-| `events`               | hypertable on `time` (7 day chunks), retention **2 years**                                  | one row per published alert: type, detector, severity (published / current), mmsi, related_mmsi, zone_id, `geography(Point)`, title, message, method_id, dedup_key, data, review `status` (`open`, `confirmed`, `dismissed`, `resolved`), `reviewed_by/at`, `note`, detector lifecycle `opened_at`, `last_seen_at`, `resolved_at`, `resolution`                                                                                                                   |
+| `events`               | hypertable on `time` (7 day chunks), retention **2 years**                                  | one row per published alert: type, detector, severity (published / current), mmsi, related_mmsi, zone_id, `geography(Point)`, title, message, method_id, dedup_key, data, review `status` (`open`, `confirmed`, `dismissed`, `resolved`), `reviewed_by/at`, `note`, detector lifecycle `opened_at`, `last_seen_at` (event time of the latest signal), `resolved_at`, `resolution` (`{ code, reason, … }`)                                                         |
 | `zones`                | projection of `GEO`                                                                         | id, org (null = global), code, name, kind, `geography(Geometry)`, buffer, active, alert_on_enter, properties; applied only when newer, deletions are tombstones                                                                                                                                                                                                                                                                                                   |
 | `vessels`              | projection of `FLEET`                                                                       | id, mmsi, org (tenancy), name, imo, flag, type code, status; one live vessel per MMSI                                                                                                                                                                                                                                                                                                                                                                             |
 | `fishing_violations`   | table                                                                                       | historical illegal-fishing apprehensions (`pnpm seed`), with source, provenance note and `method_id`                                                                                                                                                                                                                                                                                                                                                              |
@@ -193,33 +228,90 @@ Routes live under `/api/v2` (OpenAPI UI `/docs`, JSON `/openapi.json`, committed
 access token (no API keys). Tenancy (spec §8.5): `authority` and `super_admin` see every event;
 other roles only events whose `mmsi` or `relatedMmsi` belongs to a vessel of their active
 organization (from the FLEET projection, never from the client); without an organization, none.
+Event responses are **one schema per alert type**, discriminated by `type` (`TranshipmentEventDto`,
+`AnomalyEventDto`, `DarkEventDto`, `GeofenceEventDto`, `FishingEventDto`), each with its typed
+`data` (always with `messageKey` / `messageParams`, derived on read for rows written before
+0.2.0 and for legacy imports) and `resolution` (always with `code`; `null` while the occurrence
+is open).
 
-| Method  | Path                                      | Permission            | What                                                                                                                                                                                                                                                                                                                                                   |
-| ------- | ----------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `GET`   | `/api/v2/surveillance/events`             | `surveillance:read`   | events newest first; `type`, `severity`, `status`, `mmsi` (also related), `from`/`to` (default 30 days, max 366), `bbox`, `cursor`, `limit` ≤ 500                                                                                                                                                                                                      |
-| `GET`   | `/api/v2/surveillance/events/:id`         | `surveillance:read`   | one event (`404 SURVEILLANCE_EVENT_NOT_FOUND` when unknown or not visible)                                                                                                                                                                                                                                                                             |
-| `PATCH` | `/api/v2/surveillance/events/:id`         | `surveillance:review` | `{ status: confirmed \| dismissed \| open, note? }` — without `note` the stored note is kept, `null` clears it; records `surveillance_event.review` in the audit log (`from`, `to`, `noteChanged`, and the previous and new note when it changed)                                                                                                      |
-| `GET`   | `/api/v2/surveillance/transhipments`      | `surveillance:read`   | every positive analysis in the legacy result shape (`ship1MMSI`, `ship2MMSI`, `isIllegal`, `startTimestamp`, `endTimestamp`, `accuracy`, `averagePriority`, `priorityDistribution`, `detectedAt`) plus `id` (result), `eventId`, `severity`, review `status`, `lat`/`lon`, `methodId`; newest window first; `from`/`to` (window start), `mmsi`, cursor |
-| `GET`   | `/api/v2/surveillance/heatmap`            | `surveillance:read`   | `{ cells: [{ lat, lon, count }], cellKm, cellDeg, from, to, total }` with `ST_SnapToGrid`; `type`, `bbox`, `from`, `to`, `cellKm` (0.5–500, default 10)                                                                                                                                                                                                |
-| `GET`   | `/api/v2/surveillance/fishing-violations` | `surveillance:read`   | historical apprehensions (shared layer), `bbox`, `year`, page-based                                                                                                                                                                                                                                                                                    |
-| `GET`   | `/api/v2/surveillance/stats`              | `surveillance:read`   | counts by type, severity and status, active occurrences, fishing violations; the transhipment queue for authority users                                                                                                                                                                                                                                |
-| `GET`   | `/api/v2/surveillance/detectors`          | `surveillance:read`   | enabled detectors, method ids, alert types and active thresholds (SDK `DetectorRegistry.describe()`)                                                                                                                                                                                                                                                   |
-| `GET`   | `/api/v2/surveillance/methodology`        | any signed-in user    | methods of the catalog implemented here, with their sources                                                                                                                                                                                                                                                                                            |
+| Method  | Path                                              | Permission            | What                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------- | ------------------------------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`   | `/api/v2/surveillance/events`                     | `surveillance:read`   | events newest first; `type`, `severity`, review `status`, `active` (`true`: `resolvedAt` null, `false`: ended), `zoneId`, `mmsi` (also related), `q` (2–100 characters once trimmed, a blank one is refused: part of either vessel's name, case-insensitive, or the leading digits of an MMSI), `from`/`to` (default 30 days, max 366), `bbox`, `cursor`, `limit` ≤ 500                                                                                                                                                                                                                                                                                                         |
+| `GET`   | `/api/v2/surveillance/events/:id`                 | `surveillance:read`   | one event (`404 SURVEILLANCE_EVENT_NOT_FOUND` when unknown or not visible)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `PATCH` | `/api/v2/surveillance/events/:id`                 | `surveillance:review` | `{ status: confirmed \| dismissed \| open, note? }` — without `note` the stored note is kept, `null` clears it; records `surveillance_event.review` in the audit log (`from`, `to`, `noteChanged`, and the previous and new note when it changed)                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `GET`   | `/api/v2/surveillance/transhipments`              | `surveillance:read`   | every positive analysis in the legacy result shape (`ship1MMSI`, `ship2MMSI`, `isIllegal`, `startTimestamp`, `endTimestamp`, `accuracy`, `averagePriority`, `priorityDistribution`, `detectedAt`) plus `id` (result), `eventId`, `severity`, review `status`, `lat`/`lon`, `methodId`; newest window first; `from`/`to` (window start), `mmsi`, `eventId` (the analyses of one event; without `from`/`to` every window), cursor                                                                                                                                                                                                                                                 |
+| `GET`   | `/api/v2/surveillance/heatmap`                    | `surveillance:read`   | `{ cells: [{ lat, lon, count }], cellKm, cellDeg, from, to, total }` with `ST_SnapToGrid`; `type`, `bbox`, `from`, `to`, `cellKm` (0.5–500, default 10)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `GET`   | `/api/v2/surveillance/fishing-violations`         | `surveillance:read`   | historical apprehensions (shared layer), `bbox`, `year`, page-based                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `GET`   | `/api/v2/surveillance/fishing-violations/years`   | `surveillance:read`   | year facets `{ years: [{ year, count }], total }`, oldest first                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `GET`   | `/api/v2/surveillance/fishing-violations/heatmap` | `surveillance:read`   | the historical heat layer `{ cells: [{ lat, lon, count }], cellKm, cellDeg, year, total }` (`ST_SnapToGrid`); `year`, `bbox`, `cellKm` (0.5–500, default 10)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `GET`   | `/api/v2/surveillance/stats`                      | `surveillance:read`   | counts by type, severity and status, active occurrences, fishing violations; the transhipment queue for authority users                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `GET`   | `/api/v2/surveillance/stats/series`               | `surveillance:read`   | `{ from, to, bucket, timeZone, buckets: [{ from, to, total, byType, bySeverity }] }` in one query: every hour or local day of `tz` (an IANA name the database knows, any case, echoed in its spelling; default `UTC`, e.g. `Asia/Jakarta`, `Etc/GMT-7`; UTC offsets such as `+07:00` are refused because PostgreSQL would read them with the opposite sign) in `from`/`to`, empty buckets included, first and last clipped to the range, daylight saving time followed (a repeated hour is two buckets, a skipped hour none); `bucket=hour\|day` (default `day`), `type`; at most 1 000 buckets (`400 VALIDATION_FAILED` on `bucket`; on `tz` for an offset or an unknown zone) |
+| `GET`   | `/api/v2/surveillance/detectors`                  | `surveillance:read`   | enabled detectors, method ids, alert types, the raw `config` and `thresholds: [{ key, value, unit, description }]` (units `m`, `km`, `s`, `min`, `h`, `kn`, `percent`, `deg_per_min`, `count` or `null`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `GET`   | `/api/v2/surveillance/methodology`                | any signed-in user    | methods of the catalog implemented here, with their sources                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
 Outside the prefix: `GET /health/live`, `GET /health/ready`, `GET /metrics`, `GET /docs`,
 `GET /openapi.json`.
 
+Not implemented here: a realtime push of reviews (`event:reviewed`). The socket gateway belongs
+to notification, the contracts declare no review event nor that server event, and notification's
+fan-out subject carries inbox alerts with rooms computed by notification; it needs a contracts
+event (e.g. `surveillance.event.reviewed.v1`) consumed by notification. Clients refetch after
+their own review and on `alert:raised` / `alert:updated`.
+
+### Messages
+
+Every alert this service raises keeps its English `title` and `message` (e-mail, webhooks, older
+clients) and carries in `data` a stable `messageKey` with flat `messageParams` (strings, numbers,
+booleans); the API returns them for every event (derived on read for older rows). The web
+translates from the key; the English texts are rendered from the templates below
+(`src/domain/messages.ts`). `vesselName` / `relatedVesselName` are the fleet names, else the MMSI;
+speeds are rounded to 0.1 kn, scores and priorities to 0.1, durations to whole minutes. Keys never
+contain user input (zone and vessel names are parameters only).
+
+| `messageKey`                              | Parameters                                                                                                                                | English title / message                                                                                                                                                                           |
+| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `surveillance.transhipment.suspected`     | `mmsi`, `relatedMmsi`, `vesselName`, `relatedVesselName`, `startTime`, `endTime` (ISO), `durationMin`, `accuracy` (%), `averagePriority`  | Suspected transhipment between {mmsi} and {relatedMmsi} / Vessels {mmsi} and {relatedMmsi} stayed together from {startTime} to {endTime} (score {accuracy} %, average priority {averagePriority}) |
+| `surveillance.anomaly.navstatus_mismatch` | `mmsi`, `vesselName`, `navstatus`, `navstatusLabel` (English), `predictedNavstatus` (0/1), `predictedLabel` (English), `streak`, `sogKn`  | Navigational status anomaly of {mmsi} / Vessel {mmsi} reports "{navstatusLabel}" ({navstatus}) while its motion predicts {predictedLabel}, {streak} positions in a row                            |
+| `surveillance.dark.ais_gap`               | `mmsi`, `vesselName`, `lastSeenAt` (ISO), `lastSogKn`, `gapMin`                                                                           | AIS gap of {mmsi} / Vessel {mmsi} stopped reporting at {lastSeenAt} while under way at {lastSogKn} kn (silent for {gapMin} min)                                                                   |
+| `surveillance.geofence.entered`           | `mmsi`, `vesselName`, `zoneName`, `zoneKind`, `zoneCode` (when set), `sogKn`                                                              | Entered {zoneName} / Vessel {mmsi} entered {zoneName} ({zoneKind})                                                                                                                                |
+| `surveillance.fishing.loitering`          | `mmsi`, `vesselName`, `zoneName`, `zoneKind`, `zoneCode` (when set), `durationMin`, `meanSogKn`, `courseChangeRateDegPerMin`, `positions` | Suspected fishing in {zoneName} / Vessel {mmsi} loitered at {meanSogKn} kn with frequent course changes for {durationMin} min in {zoneName} ({zoneKind})                                          |
+
+Legacy transhipment imports and rows written before 0.2.0 get the key and the parameters their
+row holds (names from the projections); parameters the row lacks are left out.
+
+### Resolution codes
+
+`resolution.code` (API) and `data.code` of `alert.resolved.v1` name why an occurrence ended; the
+English `resolution.reason` is unchanged since 0.1.0. Rows without a code get the code of their
+reason on read. A duplicate open row of a key (a second writer's, see _Operations_) ends with the
+occurrence's resolution and carries `resolution.duplicateOf` (the alert it duplicated).
+
+| `code`                  | Detector          | English `reason`                       | When                                                                    |
+| ----------------------- | ----------------- | -------------------------------------- | ----------------------------------------------------------------------- |
+| `escalated`             | any               | `escalated`                            | superseded by a more severe alert of the occurrence (`supersededBy`)    |
+| `ais_resumed`           | dark              | `AIS reports resumed`                  | the vessel reported again (`reappearedAt`, `lastSeenAt`, `gapMin`)      |
+| `navstatus_consistent`  | anomaly           | `navigational status consistent again` | a position with a consistent status                                     |
+| `left_zone`             | geofence, fishing | `left the zone`                        | the vessel left the zone                                                |
+| `loitering_ended`       | fishing           | `loitering pattern ended`              | `FISHING_RESOLVE_AFTER_MIN` without a qualifying fix                    |
+| `analysis_negative`     | transhipment      | `analysis no longer positive`          | a new analysis of the pair is negative                                  |
+| `pair_separated`        | transhipment      | `pair no longer observed together`     | not observed together for `TRANSHIPMENT_PAIR_EXPIRY_MIN` (`lastSeenAt`) |
+| `zone_deleted`          | geofence          | `zone deleted`                         | the zone was deleted                                                    |
+| `zone_no_longer_alerts` | geofence          | `zone no longer alerts on entry`       | the zone is inactive, stopped alerting or is no longer watched          |
+| `legacy_import`         | transhipment      | `legacy_import`                        | imported from the legacy MVP as ended (mongo migrator)                  |
+| `other`                 | any               | as stored                              | a reason this version does not classify                                 |
+
 ## Events
 
-| Direction | Stream         | Subject                              | Type                                                                                                       | Consumer                                                                                              | Use                                                                |
-| --------- | -------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| consumes  | `AIS_POSITION` | `ais.position.v1.<partition>.<mmsi>` | `ais.position.recorded.v1`                                                                                 | durable `surveillance-positions` (`surveillance-positions-<ids>` for a `DETECTORS` subset), exclusive | detector feed                                                      |
-| consumes  | `GEO`          | `geo.zone.v1.<zoneId>`               | `geo.zone.upserted.v1`, `geo.zone.deleted.v1`                                                              | ordered `surveillance-geo-projection` (last per subject)                                              | SDK `ZoneIndex` (every instance)                                   |
-| consumes  | `GEO`          | `geo.zone.v1.<zoneId>`               | `geo.zone.upserted.v1`, `geo.zone.deleted.v1`                                                              | durable `surveillance-zones`                                                                          | `zones` table (zone names, SQL)                                    |
-| consumes  | `FLEET`        | `fleet.vessel.v1.<vesselId>`         | `fleet.vessel.upserted.v1`, `fleet.vessel.deleted.v1`                                                      | ordered `surveillance-fleet-projection` (last per subject)                                            | SDK `FleetDirectory` (`orgOf`: zone tenancy of the rules)          |
-| consumes  | `FLEET`        | `fleet.vessel.v1.<vesselId>`         | `fleet.vessel.upserted.v1`, `fleet.vessel.deleted.v1`                                                      | durable `surveillance-fleet`                                                                          | `vessels` table (tenancy, vessel names)                            |
-| publishes | `ALERTS`       | `alert.v1.<type>.<mmsi>`             | `alert.raised.v1` (`domain: surveillance`; types `transhipment`, `anomaly`, `dark`, `geofence`, `fishing`) | `notification-alerts`                                                                                 | stored in `events` first; envelope id = alert id (JetStream dedup) |
-| publishes | `AUDIT`        | `audit.v1.surveillance`              | `audit.recorded.v1` (`surveillance_event.review`)                                                          | `auth-audit`                                                                                          | review trail                                                       |
+| Direction | Stream         | Subject                              | Type                                                                                                                                            | Consumer                                                                                              | Use                                                                                    |
+| --------- | -------------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| consumes  | `AIS_POSITION` | `ais.position.v1.<partition>.<mmsi>` | `ais.position.recorded.v1`                                                                                                                      | durable `surveillance-positions` (`surveillance-positions-<ids>` for a `DETECTORS` subset), exclusive | detector feed                                                                          |
+| consumes  | `GEO`          | `geo.zone.v1.<zoneId>`               | `geo.zone.upserted.v1`, `geo.zone.deleted.v1`                                                                                                   | ordered `surveillance-geo-projection` (last per subject)                                              | SDK `ZoneIndex` (every instance)                                                       |
+| consumes  | `GEO`          | `geo.zone.v1.<zoneId>`               | `geo.zone.upserted.v1`, `geo.zone.deleted.v1`                                                                                                   | durable `surveillance-zones`                                                                          | `zones` table (zone names, SQL)                                                        |
+| consumes  | `FLEET`        | `fleet.vessel.v1.<vesselId>`         | `fleet.vessel.upserted.v1`, `fleet.vessel.deleted.v1`                                                                                           | ordered `surveillance-fleet-projection` (last per subject)                                            | SDK `FleetDirectory` (`orgOf`: zone tenancy of the rules)                              |
+| consumes  | `FLEET`        | `fleet.vessel.v1.<vesselId>`         | `fleet.vessel.upserted.v1`, `fleet.vessel.deleted.v1`                                                                                           | durable `surveillance-fleet`                                                                          | `vessels` table (tenancy, vessel names)                                                |
+| publishes | `ALERTS`       | `alert.v1.<type>.<mmsi>`             | `alert.raised.v1` (`domain: surveillance`; types `transhipment`, `anomaly`, `dark`, `geofence`, `fishing`; `data.messageKey` / `messageParams`) | `notification-alerts`                                                                                 | stored in `events` first; envelope id = alert id (JetStream dedup)                     |
+| publishes | `ALERTS`       | `alert.v1.<type>.<mmsi>`             | `alert.resolved.v1` (`alertId`, `dedupKey`, `openedAt`, `resolvedAt`, English `reason`, `data.code`)                                            | `notification-alerts` (resolves the inbox alert of the `dedupKey`)                                    | after the alert cooldown since the last raise; envelope id = `AlertResolution.eventId` |
+| publishes | `AUDIT`        | `audit.v1.surveillance`              | `audit.recorded.v1` (`surveillance_event.review`)                                                                                               | `auth-audit`                                                                                          | review trail                                                                           |
 
 Handlers are idempotent (spec §7.1): projections apply snapshots only when newer (deletions are
 tombstones), the persistence hook inserts with `ON CONFLICT DO NOTHING` and updates by alert id,
@@ -235,70 +327,70 @@ Every variable is listed with its default in [`.env.example`](.env.example); the
 to start on invalid values and prints every problem (the detector namespaces are validated by the
 SDK with each detector's zod schema; lists accept `none` for "no entries").
 
-| Variable                                    | Default                                                              | Notes                                                  |
-| ------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------ |
-| `NODE_ENV`                                  | `development`                                                        | `development` \| `test` \| `production`                |
-| `SERVICE_NAME` / `SERVICE_VERSION`          | `surveillance` / `package.json` version                              | logs, metrics, event `source`, `audit.v1.<service>`    |
-| `HOST` / `PORT`                             | `0.0.0.0` / `3007`                                                   | spec §3                                                |
-| `LOG_LEVEL` / `LOG_PRETTY`                  | `info` / `true` in development                                       | pino                                                   |
-| `SHUTDOWN_TIMEOUT_MS`                       | `30000`                                                              | graceful shutdown deadline                             |
-| `TRUSTED_PROXIES`                           | `loopback,linklocal,uniquelocal`                                     | trusted `X-Forwarded-*` sources                        |
-| `DATABASE_URL`                              | `postgres://surveillance_svc:surveillance_svc@localhost:5432/aisits` | required in production                                 |
-| `DATABASE_SCHEMA`                           | `surveillance`                                                       | `search_path=surveillance,public`                      |
-| `DATABASE_POOL_MAX`                         | `10`                                                                 |                                                        |
-| `DATABASE_STATEMENT_TIMEOUT_MS`             | `30000`                                                              |                                                        |
-| `DB_MIGRATE_ON_BOOT`                        | `true`                                                               | also `pnpm migrate`                                    |
-| `NATS_URL`                                  | `nats://localhost:4222`                                              | comma separated list allowed                           |
-| `NATS_DURABLE_PREFIX`                       | empty                                                                | prefix of durable names (tests)                        |
-| `REDIS_URL`                                 | `redis://localhost:6379`                                             | base schema only; Valkey is not used                   |
-| `AUTH_JWKS_URL`                             | `http://localhost:3001/.well-known/jwks.json`                        | tokens verified locally                                |
-| `AUTH_ISSUER` / `AUTH_AUDIENCE`             | `ais-its-auth` / `ais-its-api`                                       |                                                        |
-| `AUTH_INTERNAL_URL`                         | `http://localhost:3001`                                              | API-key introspection (unused: no API-key routes)      |
-| `INTERNAL_TOKEN`                            | `dev-internal-token-change-me`                                       | ≥ 16 characters in production                          |
-| `CORS_ORIGINS`                              | `http://localhost:5173,http://localhost:8000`                        |                                                        |
-| `PUBLIC_BASE_URL`                           | `http://localhost:8000`                                              |                                                        |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`               | unset                                                                | OTLP/HTTP tracing when set                             |
-| `DETECTOR_CONCURRENCY`                      | `8`                                                                  | positions in parallel (per-vessel order kept)          |
-| `ALERT_COOLDOWN_MIN`                        | `10`                                                                 | SDK alert cool-down per `dedupKey`                     |
-| `VESSEL_STATE_WRITE_INTERVAL_S`             | `60`                                                                 | `vessel_state` write throttle per vessel (event time)  |
-| `DETECTORS`                                 | all                                                                  | subset of `transhipment,anomaly,dark,geofence,fishing` |
-| `TRANSHIPMENT_SOURCES`                      | `batam`                                                              | candidate AIS sources (legacy `isBatam`)               |
-| `TRANSHIPMENT_ZONE_KINDS`                   | `transhipment_area`                                                  | candidate zone kinds (`none` = sources only)           |
-| `TRANSHIPMENT_NEIGHBOUR_RADIUS_M`           | `600`                                                                | candidate search radius                                |
-| `TRANSHIPMENT_NEIGHBOUR_WINDOW_MIN`         | `5`                                                                  | neighbours seen within (1–30)                          |
-| `TRANSHIPMENT_MIN_PRIORITY`                 | `1`                                                                  | accumulated priority to analyse a pair                 |
-| `TRANSHIPMENT_ANALYSIS_INTERVAL_S`          | `30`                                                                 | analyser interval                                      |
-| `TRANSHIPMENT_ANALYSIS_BATCH`               | `10`                                                                 | pairs per analyser run                                 |
-| `TRANSHIPMENT_REANALYSIS_COOLDOWN_MIN`      | `15`                                                                 | legacy re-analysis cool-down                           |
-| `TRANSHIPMENT_ROUTE_WINDOW_MIN`             | `60`                                                                 | track window of the analysis (legacy 60)               |
-| `TRANSHIPMENT_ROUTE_MAX_POINTS`             | `60`                                                                 | newest fixes per track (legacy 60)                     |
-| `TRANSHIPMENT_CHECK_DURATION_MIN`           | `30`                                                                 | sliding-window length (legacy 30)                      |
-| `TRANSHIPMENT_ACCURACY_THRESHOLD`           | `70`                                                                 | score threshold, percent (legacy 70)                   |
-| `TRANSHIPMENT_CRITICAL_ACCURACY`            | `90`                                                                 | score of a `critical` event                            |
-| `TRANSHIPMENT_PAIR_EXPIRY_MIN`              | `60`                                                                 | resolve when not observed together for                 |
-| `TRANSHIPMENT_CLAIM_TIMEOUT_MIN`            | `5`                                                                  | stale claims go back to the queue                      |
-| `ANOMALY_MIN_POSITIONS`                     | `3`                                                                  | consecutive mismatching positions                      |
-| `ANOMALY_EXCLUDED_NAVSTATUS`                | `none`                                                               | navstatus codes that never count (e.g. `15`)           |
-| `DARK_GAP_MIN`                              | `30`                                                                 | silence of a dark vessel                               |
-| `DARK_MIN_SOG_KN`                           | `1`                                                                  | last SOG must exceed                                   |
-| `DARK_HARBOUR_DISTANCE_KM`                  | `5`                                                                  | distance from harbour zones                            |
-| `DARK_HARBOUR_ZONE_KINDS`                   | `port,anchorage`                                                     | harbour zone kinds (global zones only)                 |
-| `DARK_MAX_GAP_H`                            | `24`                                                                 | older states are not reported                          |
-| `DARK_CHECK_INTERVAL_S`                     | `60`                                                                 | scan interval                                          |
-| `DARK_SCAN_LIMIT`                           | `5000`                                                               | vessels per scan                                       |
-| `GEOFENCE_KINDS`                            | `restricted,mpa,custom`                                              | watched zone kinds                                     |
-| `GEOFENCE_CRITICAL_KINDS`                   | `restricted`                                                         | `critical` kinds (`none` = all warning)                |
-| `GEOFENCE_USE_BUFFER`                       | `true`                                                               | count the zone buffer as inside                        |
-| `FISHING_ZONE_KINDS`                        | `fishing_ground,restricted`                                          | zones where the pattern is reported                    |
-| `FISHING_CRITICAL_KINDS`                    | `restricted`                                                         | `critical` kinds (`none` = all warning)                |
-| `FISHING_MIN_SOG_KN` / `FISHING_MAX_SOG_KN` | `0.5` / `4`                                                          | speed band                                             |
-| `FISHING_MIN_DURATION_MIN`                  | `30`                                                                 | minimum duration                                       |
-| `FISHING_MIN_POSITIONS`                     | `6`                                                                  | minimum fixes                                          |
-| `FISHING_MAX_GAP_MIN`                       | `10`                                                                 | largest gap inside a run                               |
-| `FISHING_SAMPLE_MIN`                        | `3`                                                                  | course changes measured between fixes this far apart   |
-| `FISHING_MIN_COURSE_CHANGE_DEG_PER_MIN`     | `3`                                                                  | minimum mean course-change rate                        |
-| `FISHING_WINDOW_MIN`                        | `60`                                                                 | evaluation window                                      |
-| `FISHING_RESOLVE_AFTER_MIN`                 | `30`                                                                 | resolve after no qualifying fix for                    |
+| Variable                                    | Default                                                              | Notes                                                                                                                                |
+| ------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `NODE_ENV`                                  | `development`                                                        | `development` \| `test` \| `production`                                                                                              |
+| `SERVICE_NAME` / `SERVICE_VERSION`          | `surveillance` / `package.json` version                              | logs, metrics, event `source`, `audit.v1.<service>`                                                                                  |
+| `HOST` / `PORT`                             | `0.0.0.0` / `3007`                                                   | spec §3                                                                                                                              |
+| `LOG_LEVEL` / `LOG_PRETTY`                  | `info` / `true` in development                                       | pino                                                                                                                                 |
+| `SHUTDOWN_TIMEOUT_MS`                       | `30000`                                                              | graceful shutdown deadline                                                                                                           |
+| `TRUSTED_PROXIES`                           | `loopback,linklocal,uniquelocal`                                     | trusted `X-Forwarded-*` sources; production: the gateway's address or CIDR only (a warning is logged while the default is in effect) |
+| `DATABASE_URL`                              | `postgres://surveillance_svc:surveillance_svc@localhost:5432/aisits` | required in production                                                                                                               |
+| `DATABASE_SCHEMA`                           | `surveillance`                                                       | `search_path=surveillance,public`                                                                                                    |
+| `DATABASE_POOL_MAX`                         | `10`                                                                 | ≥ 2: the `AlertKeyLock` holds one connection per operation, at most `(n − 1) / 2` at once                                            |
+| `DATABASE_STATEMENT_TIMEOUT_MS`             | `30000`                                                              |                                                                                                                                      |
+| `DB_MIGRATE_ON_BOOT`                        | `true`                                                               | also `pnpm migrate`                                                                                                                  |
+| `NATS_URL`                                  | `nats://localhost:4222`                                              | comma separated list allowed                                                                                                         |
+| `NATS_DURABLE_PREFIX`                       | empty                                                                | prefix of durable names (tests)                                                                                                      |
+| `REDIS_URL`                                 | `redis://localhost:6379`                                             | base schema only; Valkey is not used                                                                                                 |
+| `AUTH_JWKS_URL`                             | `http://localhost:3001/.well-known/jwks.json`                        | tokens verified locally                                                                                                              |
+| `AUTH_ISSUER` / `AUTH_AUDIENCE`             | `ais-its-auth` / `ais-its-api`                                       |                                                                                                                                      |
+| `AUTH_INTERNAL_URL`                         | `http://localhost:3001`                                              | API-key introspection (unused: no API-key routes)                                                                                    |
+| `INTERNAL_TOKEN`                            | `dev-internal-token-change-me`                                       | ≥ 16 characters in production                                                                                                        |
+| `CORS_ORIGINS`                              | `http://localhost:5173,http://localhost:8000`                        |                                                                                                                                      |
+| `PUBLIC_BASE_URL`                           | `http://localhost:8000`                                              |                                                                                                                                      |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`               | unset                                                                | OTLP/HTTP tracing when set                                                                                                           |
+| `DETECTOR_CONCURRENCY`                      | `8`                                                                  | positions in parallel (per-vessel order kept)                                                                                        |
+| `ALERT_COOLDOWN_MIN`                        | `10`                                                                 | SDK alert cool-down per `dedupKey`; also the longest delay of an `alert.resolved.v1` after the last raise                            |
+| `VESSEL_STATE_WRITE_INTERVAL_S`             | `60`                                                                 | `vessel_state` write throttle per vessel (event time)                                                                                |
+| `DETECTORS`                                 | all                                                                  | subset of `transhipment,anomaly,dark,geofence,fishing`                                                                               |
+| `TRANSHIPMENT_SOURCES`                      | `batam`                                                              | candidate AIS sources (legacy `isBatam`)                                                                                             |
+| `TRANSHIPMENT_ZONE_KINDS`                   | `transhipment_area`                                                  | candidate zone kinds (`none` = sources only)                                                                                         |
+| `TRANSHIPMENT_NEIGHBOUR_RADIUS_M`           | `600`                                                                | candidate search radius                                                                                                              |
+| `TRANSHIPMENT_NEIGHBOUR_WINDOW_MIN`         | `5`                                                                  | neighbours seen within (1–30)                                                                                                        |
+| `TRANSHIPMENT_MIN_PRIORITY`                 | `1`                                                                  | accumulated priority to analyse a pair                                                                                               |
+| `TRANSHIPMENT_ANALYSIS_INTERVAL_S`          | `30`                                                                 | analyser interval                                                                                                                    |
+| `TRANSHIPMENT_ANALYSIS_BATCH`               | `10`                                                                 | pairs per analyser run                                                                                                               |
+| `TRANSHIPMENT_REANALYSIS_COOLDOWN_MIN`      | `15`                                                                 | legacy re-analysis cool-down                                                                                                         |
+| `TRANSHIPMENT_ROUTE_WINDOW_MIN`             | `60`                                                                 | track window of the analysis (legacy 60)                                                                                             |
+| `TRANSHIPMENT_ROUTE_MAX_POINTS`             | `60`                                                                 | newest fixes per track (legacy 60)                                                                                                   |
+| `TRANSHIPMENT_CHECK_DURATION_MIN`           | `30`                                                                 | sliding-window length (legacy 30)                                                                                                    |
+| `TRANSHIPMENT_ACCURACY_THRESHOLD`           | `70`                                                                 | score threshold, percent (legacy 70)                                                                                                 |
+| `TRANSHIPMENT_CRITICAL_ACCURACY`            | `90`                                                                 | score of a `critical` event                                                                                                          |
+| `TRANSHIPMENT_PAIR_EXPIRY_MIN`              | `60`                                                                 | resolve when not observed together for                                                                                               |
+| `TRANSHIPMENT_CLAIM_TIMEOUT_MIN`            | `5`                                                                  | stale claims go back to the queue                                                                                                    |
+| `ANOMALY_MIN_POSITIONS`                     | `3`                                                                  | consecutive mismatching positions                                                                                                    |
+| `ANOMALY_EXCLUDED_NAVSTATUS`                | `none`                                                               | navstatus codes that never count (e.g. `15`)                                                                                         |
+| `DARK_GAP_MIN`                              | `30`                                                                 | silence of a dark vessel                                                                                                             |
+| `DARK_MIN_SOG_KN`                           | `1`                                                                  | last SOG must exceed                                                                                                                 |
+| `DARK_HARBOUR_DISTANCE_KM`                  | `5`                                                                  | distance from harbour zones                                                                                                          |
+| `DARK_HARBOUR_ZONE_KINDS`                   | `port,anchorage`                                                     | harbour zone kinds (global zones only)                                                                                               |
+| `DARK_MAX_GAP_H`                            | `24`                                                                 | older states are not reported                                                                                                        |
+| `DARK_CHECK_INTERVAL_S`                     | `60`                                                                 | scan interval                                                                                                                        |
+| `DARK_SCAN_LIMIT`                           | `5000`                                                               | vessels per scan                                                                                                                     |
+| `GEOFENCE_KINDS`                            | `restricted,mpa,custom`                                              | watched zone kinds                                                                                                                   |
+| `GEOFENCE_CRITICAL_KINDS`                   | `restricted`                                                         | `critical` kinds (`none` = all warning)                                                                                              |
+| `GEOFENCE_USE_BUFFER`                       | `true`                                                               | count the zone buffer as inside                                                                                                      |
+| `FISHING_ZONE_KINDS`                        | `fishing_ground,restricted`                                          | zones where the pattern is reported                                                                                                  |
+| `FISHING_CRITICAL_KINDS`                    | `restricted`                                                         | `critical` kinds (`none` = all warning)                                                                                              |
+| `FISHING_MIN_SOG_KN` / `FISHING_MAX_SOG_KN` | `0.5` / `4`                                                          | speed band                                                                                                                           |
+| `FISHING_MIN_DURATION_MIN`                  | `30`                                                                 | minimum duration                                                                                                                     |
+| `FISHING_MIN_POSITIONS`                     | `6`                                                                  | minimum fixes                                                                                                                        |
+| `FISHING_MAX_GAP_MIN`                       | `10`                                                                 | largest gap inside a run                                                                                                             |
+| `FISHING_SAMPLE_MIN`                        | `3`                                                                  | course changes measured between fixes this far apart                                                                                 |
+| `FISHING_MIN_COURSE_CHANGE_DEG_PER_MIN`     | `3`                                                                  | minimum mean course-change rate                                                                                                      |
+| `FISHING_WINDOW_MIN`                        | `60`                                                                 | evaluation window                                                                                                                    |
+| `FISHING_RESOLVE_AFTER_MIN`                 | `30`                                                                 | resolve after no qualifying fix for                                                                                                  |
 
 ## Local development
 
@@ -342,19 +434,29 @@ transhipment area) and vessels from the fleet service; without them the detector
   candidate scoring, interpolation, resampling and 39 complete detections, computed once by
   running the verbatim legacy `utils/illegal-transhipment.ts` and `utils/cii/speed-calculation.ts`),
   and every detector with synthetic tracks and zones through the SDK `DetectorTestHarness` with
-  in-memory storage doubles (`src/detectors/shared/__testing__`), including failure isolation and
-  `DETECTORS` subsets.
+  in-memory storage doubles (`src/detectors/shared/__testing__`), including failure isolation,
+  `DETECTORS` subsets, the activation hooks (`harness.deactivate()` / `activate()`: ticks only
+  while active, state rebuilt on a takeover), published resolutions (`harness.resolvedEvents`),
+  the message keys and resolution codes, the thresholds metadata and the statistics series.
 - **Integration** (`pnpm test:int`, `test/*.int.test.ts`): the real `AppModule` against
   `timescale/timescaledb-ha:pg17` and `nats:2.11-alpine` started once by
   `test/support/global-setup.ts`, signed test JWTs: zone, fleet and position events → `events`
-  rows and `alert.raised.v1` for each detector, the cool-down (suppressed re-entry), the review
+  rows and `alert.raised.v1` for each detector, the cool-down (suppressed re-entry), published
+  resolutions (`test/resolutions.int.test.ts`: `alert.resolved.v1` with its code after the
+  cooldown, event-time `last_seen_at`), the event filters (`active`, `zoneId`, `q`), the
+  statistics series, the fishing-violation facets and heat layer, the detector thresholds, the review
   flow with its audit record (notes kept unless changed), tenancy filtering, cursors, stored
   transhipment results, heatmap, statistics, the idempotent seed, the platform behaviour (health,
   migrations, 401, OpenAPI, metrics), the storage SQL (idempotent accumulation and streaks,
   restart of stale accumulations, pruning, claim-guarded completion with its result) and two
-  **replicas** on one durable (`test/ha.int.test.ts`: the standby never analyses, concurrent
-  raises of one key open one occurrence, a takeover adopts the occurrences the previous active
-  instance opened and resolves them). Set
+  **replicas** on one durable (`test/ha.int.test.ts`: the standby stays inactive and never
+  analyses, concurrent raises of one key through the `AlertKeyLock` open one occurrence and a
+  resolution by one instance is forgotten by the other, a graceful stop publishes the pending
+  resolutions and hands the pin over, and the new active instance reloads the open occurrences
+  before its first position, raises nothing twice and resolves them; an active instance run as a
+  child process — `test/support/service-process.ts` compiles `src/` with SWC into
+  `node_modules/.cache` — is paused with `SIGSTOP` past the pinned TTL and resumed with `SIGCONT`:
+  it handles its buffered positions and opens no second occurrence or `alert.raised.v1`). Set
   `TESTCONTAINERS_RYUK_DISABLED=true` where Ryuk is unavailable; the global teardown stops the
   containers.
 
@@ -374,18 +476,27 @@ transhipment area) and vessels from the fleet service; without them the detector
 
 - **Health**: `/health/live` (process up), `/health/ready` (database, NATS; `503` while shutting
   down). The port opens only after the migrations ran and the GEO/FLEET snapshots were loaded.
-- **Replicas and failover**: run one replica per `DETECTORS` set for throughput and extra ones for
-  failover. Only the instance pinned to the position consumer handles positions; when it stops
-  pulling for 30 s (pinned TTL) a standby takes over, reloads the open occurrences from `events`
-  (log `Alert state reloaded: adopted …, dropped …`) and its ticks start; the former instance's
-  ticks stop within 2 min. The dark scan and the transhipment analyser hold a transaction-scoped
-  advisory lock (`pg_advisory_xact_lock(7301840, hashtext(dedupKey))`) per alert operation.
+- **Replicas and failover**: run two or more replicas per `DETECTORS` set with **rolling
+  updates**; replicas give failover, not throughput. Only the instance pinned to the position
+  consumer is active. A graceful stop publishes pending resolutions and releases the pin, so a
+  standby takes over at once (log `Active instance of surveillance-positions: reloaded the open alerts (…)`); after a crash or a hang the pin moves
+  when the pinned TTL (30 s) expires. The new active instance reloads the open occurrences from
+  `events` before its first position. The dark scan, the transhipment analyser and the
+  position transitions (new occurrences and escalations of geofence, anomaly and fishing) hold a
+  transaction-scoped advisory lock (`pg_advisory_xact_lock(7301840, hashtext(dedupKey))`) per
+  alert operation; at most `(DATABASE_POOL_MAX − 1) / 2` (4) operations hold one per instance
+  (each needs a second connection to align and persist), the others wait without a connection.
+  Duplicate open rows of a key, should a second writer still open one, end with the occurrence
+  (`resolution.duplicateOf`), and `loadOpen` lists the newest last, so a reload keeps the newest.
 - **Metrics** (`/metrics`, prefix `aisits_`): HTTP RED metrics; event metrics
   (`aisits_events_consumed_total{stream,consumer,outcome}`, `aisits_events_invalid_total`,
   `aisits_event_handler_duration_seconds`, `aisits_events_published_total`); SDK detector metrics
   (`aisits_detector_evaluations_total{detector}`, `aisits_detector_duration_seconds{detector}`,
   `aisits_detector_alerts_total{detector,severity}`, `aisits_detector_errors_total{detector,hook}`,
-  `aisits_detector_skipped_total{detector,hook}`, `aisits_detector_positions_total{outcome}`);
+  `aisits_detector_skipped_total{detector,hook}`, `aisits_detector_positions_total{outcome}`,
+  `aisits_detector_alert_resolutions_total{detector}`,
+  `aisits_detector_activations_total{outcome}`, and
+  `aisits_events_consumer_activations_total{consumer}` of the position consumer);
   domain metrics `aisits_surveillance_transhipment_observations_total`,
   `aisits_surveillance_transhipment_analyses_total{outcome}` (`illegal`, `clean`,
   `insufficient_data`, `failed`) and `aisits_surveillance_transhipment_pairs{status}`.
@@ -402,29 +513,52 @@ transhipment area) and vessels from the fleet service; without them the detector
     `…_analyses_total{outcome="insufficient_data"}` missing tracks, a growing
     `…_pairs{status="pending"}` an analyser that falls behind (raise
     `TRANSHIPMENT_ANALYSIS_BATCH` or lower `TRANSHIPMENT_ANALYSIS_INTERVAL_S`); `failed` pairs
-    carry `last_error` in `transhipment_pairs`.
+    carry `last_error` in `transhipment_pairs` (for a database error the driver's message,
+    without the statement's bound values).
   - _Every vessel looks dark after an outage_: it does not — the dark scan uses the feed's
     event-time watermark, not the wall clock, and starts only after the first position.
-  - _An alert re-raised within 10 minutes is missing_: that is the cool-down (`suppressed`,
-    the row is reopened); see `ALERT_COOLDOWN_MIN`.
+  - _A re-entry shows no new alert_: that is the cool-down — a re-raise within
+    `ALERT_COOLDOWN_MIN` (10) of the occurrence's last publication (its raise or escalation) is
+    `suppressed`: the row is reopened and its pending `alert.resolved.v1` cancelled. A later
+    re-raise, even minutes after the resolution, is a new occurrence: the inbox gets `resolved`,
+    then a new `raised`.
+  - _An inbox alert stays open after the condition ended_: `alert.resolved.v1` waits for the
+    cooldown since the last raise (`ALERT_COOLDOWN_MIN`) and is cancelled by a re-raise within it;
+    a crash inside the window loses only the event (the `events` row is resolved). Notification
+    must be on contracts 0.4 (older instances skip the type).
   - _No transhipment analyses on a replica_: expected on standbys —
     `aisits_surveillance_transhipment_analyses_total` grows only on the instance consuming
     positions (`aisits_detector_positions_total` grows there too).
-- **Platform issues** (worked around here, reported to the kit): the Detector SDK of
-  `@darmawanweb/ais-its-nest` 0.2.0 restores the `AlertEmitter` only at bootstrap, runs `onTick`
-  on every replica and exposes no "standby" state to detectors (`ConsumerHealth.standby` of the
-  position consumer is reachable only through the internal `NatsConsumerRuntime`). `src/detectors/shared/alert-coordinator.ts` (`AlertCoordinator`, implemented by
-  `PostgresAlertCoordinator`) fills the gap until the kit reloads `loadOpen()` on
-  `consumer_pinned` and pauses ticks on standbys.
+- **Platform issues**: the workarounds of kit 0.2 are gone — the `AlertCoordinator` (reload after
+  a 15 s pause, 2-minute tick gate) is replaced by the kit's activation (`loadOpen` reload,
+  `onActivated`, ticks only while active, `context.isActive()`) and, for the positions a paused
+  instance still handles, by the `AlertKeyLock` alignment of position transitions; `src/db/rows.ts`
+  by the kit's `rowDate` / `rowDateOrNull`, `app.get(ALERT_PERSISTENCE)` by
+  `app.get(DetectorEventsRepository)`, and resolutions of occurrences another instance ended are
+  `forget()` (no second `alert.resolved.v1`). Still open in kit 0.3 (reported): (1) an instance
+  cut off from NATS stays active (missed heartbeats do not deactivate it) while the server pins
+  another one after the TTL, so both may tick; (2) messages an exclusive consumer buffered across
+  a pause longer than the pinned TTL (`SIGSTOP`, a blocked event loop) are dispatched after it
+  with the old `Nats-Pin-Id`: the kit re-checks neither the pin nor reloads the open occurrences
+  before handling them, so the resumed instance acts as active on stale state until the server's
+  unpin notice arrives. The `AlertKeyLock` keeps `events` at one open occurrence per key in both
+  cases (the `events` hypertable cannot have a unique index on `dedup_key` alone); the resumed
+  instance may still publish a duplicate `alert.resolved.v1` of an occurrence both handled
+  (same `alertId`). Proposed kit fixes: deactivate an exclusive consumer after missed heartbeats
+  spanning the pinned TTL, and drop (nak) or re-check messages buffered across such a gap.
 - **Known limitations**
   - Detector state is per instance: replicas give failover, not throughput (exclusive consumer).
+  - A crash between a resolution and the end of its cooldown loses that `alert.resolved.v1` (the
+    `events` row is resolved; the inbox alert stays open until resolved by hand).
+  - After a takeover the transhipment candidate search also reads `vessel_state` for one
+    neighbour window (the in-memory index missed the previous instance's positions).
   - After a restart the transhipment candidate search also reads `vessel_state` (`ST_DWithin`)
     until the in-memory `PairSearch` covers one neighbour window; `vessel_state` is written at
     most every `VESSEL_STATE_WRITE_INTERVAL_S` (60 s) per vessel (transhipment candidates and
     streak changes always), so right after a restart the dark scan may see a state up to 60 s
     older than the vessel's last position (negligible against the 30-minute gap).
-  - A dark resolution reports `lastSeenAt` / `gapMin` as `null` when the pipeline sends
-    `previous: null` (it sends the last recorded position for every known vessel).
+  - A dark resolution takes `lastSeenAt` / `gapMin` from the pipeline's `previous` position, or
+    from the occurrence's event time (the last sighting) when the pipeline sends `previous: null`.
   - Dark, fishing and anomaly-persistence thresholds are v2 design defaults that need domain
     validation (`needsCitation` in the catalog).
   - The heatmap grid is square in degrees (`cellKm / 111.32`): within 2 % of square in km at

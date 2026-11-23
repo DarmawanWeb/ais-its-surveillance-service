@@ -3,7 +3,7 @@ import { newId } from '@darmawanweb/ais-its-contracts/domain';
 import { DetectorTestHarness } from '@darmawanweb/ais-its-nest/analytics';
 import { describe, expect, it } from 'vitest';
 
-import { LocalAlertCoordinator } from '../shared/__testing__/local-alert-coordinator.js';
+import { DirectAlertKeyLock } from '../shared/__testing__/direct-alert-key-lock.js';
 import { MemoryVesselStates } from '../shared/__testing__/memory-storage.js';
 import { VesselStateRecorder } from '../shared/vessel-state.recorder.js';
 import { DarkDetector, darkKey } from './dark.detector.js';
@@ -17,13 +17,13 @@ const at = (minutes: number): Date =>
 function setup(env: Record<string, string> = {}) {
   const states = new MemoryVesselStates();
   const recorder = new VesselStateRecorder(states, { writeIntervalMs: 60_000 });
-  const coordinator = new LocalAlertCoordinator();
+  const lock = new DirectAlertKeyLock();
   const harness = DetectorTestHarness.create({
-    detectors: [new DarkDetector(recorder, states, coordinator)],
+    detectors: [new DarkDetector(recorder, states, lock)],
     env,
     now: START,
   });
-  return { harness, states, coordinator };
+  return { harness, states, lock };
 }
 
 /** A second vessel keeps reporting, so the feed's event time advances. */
@@ -98,7 +98,50 @@ describe('DarkDetector', () => {
     expect(harness.resolutions).toHaveLength(1);
     expect(harness.resolutions[0]).toMatchObject({
       reason: 'AIS reports resumed',
-      data: { gapMin: 50 },
+      data: { gapMin: 50, code: 'ais_resumed' },
+    });
+
+    // alert.resolved.v1 goes out once the alert cooldown since the raise passed.
+    expect(harness.resolvedEvents).toEqual([]);
+    harness.advance(10 * 60_000);
+    await harness.maintain();
+    expect(harness.resolvedEvents).toEqual([
+      expect.objectContaining({
+        alertId: harness.alertsOf('dark')[0]?.id,
+        dedupKey: darkKey(DARK),
+        reason: 'AIS reports resumed',
+        openedAt: at(0).toISOString(),
+        resolvedAt: at(50).toISOString(),
+        methodId: 'dark.ais_gap',
+        data: expect.objectContaining({
+          code: 'ais_resumed',
+          gapMin: 50,
+        }) as unknown,
+      }),
+    ]);
+  });
+
+  it('falls back to the occurrence event time when the position has no previous one', async () => {
+    const { harness } = setup();
+    await harness.position({
+      mmsi: DARK,
+      time: at(0),
+      lat: 1.5,
+      lon: 105,
+      sog: 6,
+    });
+    await liveFeed(harness, 45);
+    await harness.tick(at(45));
+    await harness.position({
+      mmsi: DARK,
+      time: at(50),
+      lat: 1.6,
+      lon: 105.1,
+      sog: 6,
+      previous: null,
+    });
+    expect(harness.resolutions[0]).toMatchObject({
+      data: { lastSeenAt: at(0).toISOString(), gapMin: 50 },
     });
   });
 
@@ -223,8 +266,8 @@ describe('DarkDetector', () => {
     });
   });
 
-  it('never scans on a standby (no position handled within the active window)', async () => {
-    const { harness, coordinator } = setup({ DARK_CHECK_INTERVAL_S: '1' });
+  it('scans only on the active instance and at the first tick after a takeover', async () => {
+    const { harness, lock } = setup({ DARK_CHECK_INTERVAL_S: '3600' });
     await harness.position({
       mmsi: DARK,
       time: at(0),
@@ -232,22 +275,25 @@ describe('DarkDetector', () => {
       lon: 105,
       sog: 6,
     });
+    await liveFeed(harness, 16);
+    await harness.tick(at(20)); // scans: not dark yet
     await liveFeed(harness, 31);
-    // The feed moved to another instance 5 minutes ago.
+
+    // Another instance took over: ticks do nothing here.
+    await harness.deactivate();
+    expect(harness.active).toBe(false);
     await harness.tick(at(36));
     expect(harness.alertsOf('dark')).toEqual([]);
-    expect(coordinator.isActive(at(36))).toBe(false);
 
-    await harness.position({
-      mmsi: LIVE,
-      time: at(36.5),
-      lat: 0.5,
-      lon: 108,
-      sog: 8,
-    });
-    await harness.tick(at(37));
+    // Taking over again: the next tick scans at once (not after the interval).
+    await harness.activate();
+    await harness.tick(at(36.5));
     expect(harness.alertsOf('dark')).toHaveLength(1);
-    // The raise ran through the coordinator (one occurrence across replicas).
-    expect(coordinator.exclusiveKeys).toEqual([darkKey(DARK)]);
+    expect(harness.alertsOf('dark')[0]?.data).toMatchObject({
+      messageKey: 'surveillance.dark.ais_gap',
+      messageParams: { mmsi: DARK, vesselName: String(DARK), gapMin: 31 },
+    });
+    // The raise ran through the key lock (one occurrence across replicas).
+    expect(lock.keys).toEqual([darkKey(DARK)]);
   });
 });

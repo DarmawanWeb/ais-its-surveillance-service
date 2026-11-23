@@ -2,11 +2,11 @@ import {
   type Database,
   InjectDb,
   pointGeography,
+  rowDate,
 } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
 
-import { type RawTimestamp, rowDate } from '../../db/rows.js';
 import * as schema from '../../db/schema.js';
 import type { TranshipmentPairStatus } from '../../db/schema.js';
 import type { PairObservation } from '../../domain/transhipment/pairs.js';
@@ -22,11 +22,11 @@ import {
 interface ClaimedRow extends Record<string, unknown> {
   mmsi_a: number;
   mmsi_b: number;
-  claimed_at: RawTimestamp;
+  claimed_at: Date | string;
   priority: number;
-  queued_at: RawTimestamp;
-  first_seen_at: RawTimestamp;
-  last_seen_at: RawTimestamp;
+  queued_at: Date | string;
+  first_seen_at: Date | string;
+  last_seen_at: Date | string;
   observations: number;
   last_distance_m: number | null;
 }
@@ -65,9 +65,11 @@ function groupByPair(
 /**
  * PostgreSQL implementation of the candidate queue: one upsert per position
  * for the accumulation and `FOR UPDATE SKIP LOCKED` claims, so two analysers
- * never hold the same pair (only the instance consuming positions analyses;
- * a former active instance may overlap briefly, and the `AlertCoordinator`
- * keeps its alert operations consistent).
+ * never hold the same pair (only the active instance analyses; a former
+ * active instance cut off from NATS may overlap briefly, and the
+ * `AlertKeyLock` — `PostgresAlertKeyLock`: an advisory lock per key and the
+ * alignment of the key with `events` — keeps its alert operations
+ * consistent).
  *
  * @method transhipment.candidate_queue
  * @see ../../../../../docs/METHODOLOGY.md#transhipment.candidate_queue
@@ -257,7 +259,7 @@ export class TranshipmentPairsRepository extends TranshipmentPairStorage {
     const { rows } = await this.db.execute<{
       mmsi_a: number;
       mmsi_b: number;
-      last_seen_at: RawTimestamp;
+      last_seen_at: Date | string;
     }>(sql`
       SELECT p.mmsi_a, p.mmsi_b, p.last_seen_at
       FROM transhipment_pairs AS p

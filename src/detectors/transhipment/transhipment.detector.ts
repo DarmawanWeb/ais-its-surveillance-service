@@ -6,8 +6,10 @@ import {
   RegisterDetector,
   type VesselPosition,
 } from '@darmawanweb/ais-its-nest/analytics';
+import { sanitizeError } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
 
+import { resolution, transhipmentText } from '../../domain/messages.js';
 import {
   detectTranshipment,
   type TranshipmentDetection,
@@ -23,7 +25,7 @@ import {
   transhipmentKey,
 } from '../../domain/transhipment/pairs.js';
 import { fixAtTime, type TrackFix } from '../../domain/transhipment/track.js';
-import { AlertCoordinator } from '../shared/alert-coordinator.js';
+import { AlertKeyLock } from '../shared/alert-key-lock.js';
 import { TrackStorage, VesselStateStorage } from '../shared/storage.js';
 import { VesselStateRecorder } from '../shared/vessel-state.recorder.js';
 import {
@@ -83,7 +85,7 @@ const PRUNE_EVERY_RUNS = 120;
  *    continued within `TRANSHIPMENT_ROUTE_WINDOW_MIN` starts over). A
  *    vessel is a candidate through a `transhipment_area` zone only when the
  *    zone is global or its own organization's (spec §8.5).
- * 2. **Analyser** (tick, only on the instance consuming positions) — claims
+ * 2. **Analyser** (tick: the SDK runs it only on the active instance) — claims
  *    the pending pairs above `TRANSHIPMENT_MIN_PRIORITY` (priority DESC,
  *    queued_at ASC, `SKIP LOCKED`; pairs analysed within 15 min are
  *    skipped), runs the legacy interpolation / sliding-window detection over
@@ -91,9 +93,13 @@ const PRUNE_EVERY_RUNS = 120;
  *    every positive analysis in `transhipment_results` and raises a
  *    `transhipment` event (accuracy, window, average priority, distribution)
  *    when the score reaches 70; a negative analysis or a pair not observed
- *    for `TRANSHIPMENT_PAIR_EXPIRY_MIN` resolves the open occurrence. Every
- *    raise / resolve runs through the {@link AlertCoordinator}, so replicas
- *    never open an occurrence twice or miss one opened by another replica.
+ *    for `TRANSHIPMENT_PAIR_EXPIRY_MIN` resolves the open occurrence (codes
+ *    `analysis_negative` / `pair_separated`, published as `alert.resolved.v1`
+ *    after the alert cooldown). Every raise / resolve runs through the
+ *    {@link AlertKeyLock}, so even a former active instance that still ticks
+ *    never opens an occurrence twice or misses one another instance opened.
+ *    A takeover (`onActivated`) restarts the cold-start window and analyses
+ *    at the first tick.
  *
  * Severity: `critical` when the score reaches `TRANSHIPMENT_CRITICAL_ACCURACY`
  * (90), else `warning`. Dedup key `transhipment:<minMmsi>:<maxMmsi>`.
@@ -124,14 +130,13 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     private readonly tracks: TrackStorage,
     private readonly pairs: TranshipmentPairStorage,
     private readonly metrics: TranshipmentMetrics,
-    private readonly coordinator: AlertCoordinator,
+    private readonly lock: AlertKeyLock,
   ) {}
 
   async onPosition(
     context: DetectorContext<TranshipmentConfig>,
     position: VesselPosition,
   ): Promise<void> {
-    await this.coordinator.positionSeen(context.now());
     const eligible = this.isCandidate(context, position);
     await this.recorder.observe(context, position, { force: eligible });
     if (!eligible) return;
@@ -158,8 +163,7 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
     ) {
       return;
     }
-    // Only the instance consuming positions analyses (never a standby).
-    if (!this.coordinator.isActive(now)) return;
+    // A tick: the SDK runs it only on the active instance (never a standby).
     this.lastAnalysisAt = now.getTime();
 
     const recovered = await this.pairs.recoverStale(
@@ -297,7 +301,7 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
       });
       const result = { ...serialize(detection), ...sizes };
       if (detection.isIllegal) {
-        const positive = await this.coordinator.exclusive(key, () =>
+        const positive = await this.lock.run(key, () =>
           this.raise(context, pair, detection, route1, route2, now),
         );
         const completed = await this.pairs.complete(
@@ -310,17 +314,21 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
             `Claim of ${pair.mmsiA}-${pair.mmsiB} expired during its analysis: result discarded (the new claim analyses again)`,
           );
       } else {
-        await this.coordinator.exclusive(key, () =>
+        await this.lock.run(key, () =>
           context.alerts.resolve(key, {
             at: pair.lastSeenAt,
-            reason: 'analysis no longer positive',
+            ...resolution('analysis_negative'),
           }),
         );
         await this.pairs.complete(pair, { outcome: 'analysed', result }, now);
       }
       this.metrics.analysed(detection.isIllegal ? 'illegal' : 'clean');
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      // Logged and stored in `last_error`: without the values a failed
+      // statement bound (drizzle's message lists every parameter).
+      const sanitized = sanitizeError(error);
+      const message =
+        sanitized instanceof Error ? sanitized.message : String(sanitized);
       context.logger.error(
         `Analysis of ${pair.mmsiA}-${pair.mmsiB} failed: ${message}`,
       );
@@ -356,6 +364,16 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
       detection.accuracy,
       config.CRITICAL_ACCURACY,
     );
+    const { title, message, messageKey, messageParams } = transhipmentText({
+      mmsi: mmsiA,
+      relatedMmsi: mmsiB,
+      vesselName: context.fleet.byMmsi(mmsiA)?.name,
+      relatedVesselName: context.fleet.byMmsi(mmsiB)?.name,
+      startTime: detection.startTimestamp,
+      endTime: detection.endTimestamp,
+      accuracy: detection.accuracy,
+      averagePriority: detection.averagePriority,
+    });
 
     await context.alerts.raise({
       type: TRANSHIPMENT_ALERT,
@@ -363,11 +381,8 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
       severity,
       mmsi: mmsiA,
       relatedMmsi: mmsiB,
-      title: `Suspected transhipment between ${mmsiA} and ${mmsiB}`,
-      message:
-        `Vessels ${mmsiA} and ${mmsiB} stayed together from ` +
-        `${detection.startTimestamp.toISOString()} to ${detection.endTimestamp.toISOString()} ` +
-        `(score ${detection.accuracy} %, average priority ${detection.averagePriority})`,
+      title,
+      message,
       position,
       occurredAt: detection.startTimestamp,
       methodId: TRANSHIPMENT_EVENT_METHOD,
@@ -381,6 +396,8 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
         route1Points: route1.length,
         route2Points: route2.length,
         methodIds: [...this.methodIds],
+        messageKey,
+        messageParams,
       },
     });
     const occurrence = context.alerts.get(key);
@@ -428,17 +445,30 @@ export class TranshipmentDetector implements Detector<TranshipmentConfig> {
         alert.mmsi,
         alert.relatedMmsi ?? alert.mmsi,
       );
-      const seen = lastSeen.get(pairMapKey(mmsiA, mmsiB)) ?? alert.lastSeenAt;
+      // Event time of the occurrence's last signal when the pair row is gone.
+      const seen =
+        lastSeen.get(pairMapKey(mmsiA, mmsiB)) ??
+        alert.lastOccurredAt ??
+        alert.lastSeenAt;
       if (reference.getTime() - seen.getTime() > expiryMs) {
-        await this.coordinator.exclusive(alert.dedupKey, () =>
+        await this.lock.run(alert.dedupKey, () =>
           context.alerts.resolve(alert.dedupKey, {
             at: reference,
-            reason: 'pair no longer observed together',
-            data: { lastSeenAt: seen.toISOString() },
+            ...resolution('pair_separated', { lastSeenAt: seen.toISOString() }),
           }),
         );
       }
     }
+  }
+
+  /**
+   * A takeover: this instance's neighbour index missed the positions the
+   * other instance handled, so the cold-start window (neighbours also from
+   * `vessel_state`) starts again, and the analyser runs at the first tick.
+   */
+  onActivated(): void {
+    this.firstPositionAt = undefined;
+    this.lastAnalysisAt = undefined;
   }
 }
 

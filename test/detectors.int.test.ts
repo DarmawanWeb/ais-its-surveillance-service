@@ -69,6 +69,16 @@ describe('detectors: zone, fleet and position events → events + alert.raised.v
       'transhipment',
     ]);
     expect(detectors.every((detector) => detector.enabled)).toBe(true);
+    // Thresholds with units and descriptions (the web no longer hard-codes them).
+    const transhipment = response
+      .json<{ id: string; thresholds: Record<string, unknown>[] }[]>()
+      .find((detector) => detector.id === 'transhipment');
+    expect(transhipment?.thresholds).toContainEqual({
+      key: 'ACCURACY_THRESHOLD',
+      value: 70,
+      unit: 'percent',
+      description: 'Minimum score of an illegal transhipment',
+    });
   });
 
   it('projects zones and vessels into their tables', async () => {

@@ -7,11 +7,11 @@ import {
   type Database,
   InjectDb,
   pointGeography,
+  rowDate,
 } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
 import { sql } from 'drizzle-orm';
 
-import { type RawTimestamp, rowDate } from '../../db/rows.js';
 import type * as schema from '../../db/schema.js';
 import {
   type AnomalyStreak,
@@ -25,7 +25,7 @@ import {
 /** A `vessel_state` row as selected by the queries below. */
 interface VesselStateRow extends Record<string, unknown> {
   mmsi: number;
-  time: RawTimestamp;
+  time: Date | string;
   source: AisSource;
   lat: number;
   lon: number;
@@ -109,7 +109,7 @@ export class VesselStateRepository extends VesselStateStorage {
     const { rows } = await this.db.execute<{
       mmsi: number;
       anomaly_streak: number;
-      anomaly_streak_at: RawTimestamp;
+      anomaly_streak_at: Date | string;
     }>(sql`
       SELECT mmsi, anomaly_streak, anomaly_streak_at
       FROM vessel_state

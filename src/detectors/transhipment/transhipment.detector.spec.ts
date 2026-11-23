@@ -2,9 +2,9 @@ import type { ZoneSnapshotV1 } from '@darmawanweb/ais-its-contracts/events';
 import { newId } from '@darmawanweb/ais-its-contracts/domain';
 import { DetectorTestHarness } from '@darmawanweb/ais-its-nest/analytics';
 import { MetricsService } from '@darmawanweb/ais-its-nest/metrics';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { LocalAlertCoordinator } from '../shared/__testing__/local-alert-coordinator.js';
+import { DirectAlertKeyLock } from '../shared/__testing__/direct-alert-key-lock.js';
 import {
   MemoryPairs,
   MemoryTracks,
@@ -27,7 +27,7 @@ function setup(env: Record<string, string> = {}) {
   const pairs = new MemoryPairs();
   const recorder = new VesselStateRecorder(states, { writeIntervalMs: 60_000 });
   const metrics = new MetricsService();
-  const coordinator = new LocalAlertCoordinator();
+  const lock = new DirectAlertKeyLock();
   const harness = DetectorTestHarness.create({
     detectors: [
       new TranshipmentDetector(
@@ -36,13 +36,13 @@ function setup(env: Record<string, string> = {}) {
         tracks,
         pairs,
         new TranshipmentMetrics(metrics),
-        coordinator,
+        lock,
       ),
     ],
     env,
     now: START,
   });
-  return { harness, states, tracks, pairs, metrics, coordinator };
+  return { harness, states, tracks, pairs, metrics, lock };
 }
 
 /** Two vessels drifting side by side (≈ 20 m apart), one fix per minute each. */
@@ -366,27 +366,68 @@ describe('TranshipmentDetector', () => {
     });
   });
 
-  it('analyses only while this instance consumes positions (never on a standby)', async () => {
-    const { harness, pairs, coordinator } = setup();
+  it('analyses only on the active instance, at the first tick after a takeover', async () => {
+    const { harness, pairs, lock } = setup();
     await sideBySide(harness, 60);
-    // No position for 5 minutes: the feed moved to another replica.
+    // Another instance took over: ticks do nothing here.
+    await harness.deactivate();
     await harness.tick(at(66));
     expect(pairs.get(A, B)).toMatchObject({ status: 'pending', analyses: 0 });
     expect(harness.alertsOf('transhipment')).toEqual([]);
 
-    await harness.position({
-      mmsi: C,
-      time: at(66.5),
-      source: 'primary',
-      lat: 2,
-      lon: 105,
-      sog: 10,
-      cog: 0,
-      hdg: 0,
-    });
+    await harness.activate();
     await harness.tick(at(67));
     expect(pairs.get(A, B)).toMatchObject({ analyses: 1 });
-    expect(coordinator.exclusiveKeys).toEqual([`transhipment:${A}:${B}`]);
+    expect(lock.keys).toEqual([`transhipment:${A}:${B}`]);
+    expect(harness.alertsOf('transhipment')[0]?.data).toMatchObject({
+      messageKey: 'surveillance.transhipment.suspected',
+      messageParams: { mmsi: A, relatedMmsi: B, accuracy: 100 },
+    });
+  });
+
+  it("searches stored neighbours again after a takeover (the index missed the other instance's positions)", async () => {
+    const { harness, states, pairs } = setup();
+    // Active for longer than the cold-start window (C is a candidate far away).
+    for (const minute of [0, 10])
+      await harness.position({
+        mmsi: C,
+        time: at(minute),
+        source: 'batam',
+        lat: 2,
+        lon: 105,
+        sog: 10,
+      });
+    await harness.deactivate();
+    // Meanwhile the other instance handled B and stored its state.
+    await states.save(
+      {
+        mmsi: B,
+        time: at(20),
+        source: 'batam',
+        lat: 1.15018,
+        lon: 104.05,
+        sog: 0.5,
+        cog: 46,
+        hdg: 46,
+        navstatus: 0,
+        predictedNavstatus: 0,
+        coastDistanceM: null,
+        previous: null,
+      },
+      [],
+    );
+    await harness.activate();
+    await harness.position({
+      mmsi: A,
+      time: at(21),
+      source: 'batam',
+      lat: 1.15,
+      lon: 104.05,
+      sog: 0.4,
+      cog: 45,
+      hdg: 45,
+    });
+    expect(pairs.get(A, B)).toMatchObject({ priority: 27 });
   });
 
   it('stores every positive analysis as a result of the occurrence', async () => {
@@ -441,7 +482,7 @@ describe('TranshipmentDetector', () => {
           tracks,
           pairs,
           new TranshipmentMetrics(new MetricsService()),
-          new LocalAlertCoordinator(),
+          new DirectAlertKeyLock(),
         ),
       ],
       now: at(3),
@@ -476,5 +517,38 @@ describe('TranshipmentDetector', () => {
       // B's first fix of the new encounter observes A.
       firstSeenAt: new Date(at(120).getTime() + 15_000),
     });
+  });
+
+  it('marks a pair failed without the values a failed statement bound', async () => {
+    const { harness, pairs, tracks, metrics } = setup();
+    await sideBySide(harness, 60);
+    // drizzle's DrizzleQueryError: its message and params list every bound value.
+    const driver = Object.assign(
+      new Error('canceling statement due to statement timeout'),
+      { code: '57014', severity: 'ERROR' },
+    );
+    const failed = Object.assign(
+      new Error(
+        'Failed query: SELECT time FROM track_points WHERE mmsi = $1\nparams: 525000101,KM Rahasia',
+      ),
+      {
+        query: 'SELECT time FROM track_points WHERE mmsi = $1',
+        params: [A, 'KM Rahasia'],
+        cause: driver,
+      },
+    );
+    vi.spyOn(tracks, 'route').mockRejectedValue(failed);
+
+    await harness.tick(at(61));
+
+    const pair = pairs.get(A, B);
+    expect(pair).toMatchObject({
+      status: 'failed',
+      lastError: 'canceling statement due to statement timeout',
+    });
+    expect(harness.alertsOf('transhipment')).toEqual([]);
+    expect(await metrics.render()).toContain(
+      'aisits_surveillance_transhipment_analyses_total{outcome="failed"} 1',
+    );
   });
 });

@@ -14,7 +14,8 @@ import {
   isDarkVessel,
   minutesBetween,
 } from '../../domain/dark.js';
-import { AlertCoordinator } from '../shared/alert-coordinator.js';
+import { darkText, resolution } from '../../domain/messages.js';
+import { AlertKeyLock } from '../shared/alert-key-lock.js';
 import {
   boundedInteger,
   positiveNumber,
@@ -68,9 +69,12 @@ const TICK_INTERVAL_MS = 5_000;
  * authorities, so a tenant's private zone must never silence it (spec §8.5).
  * The watermark (newest processed position, never ahead of the wall clock)
  * keeps a feed outage or a restart backlog from reporting every vessel; the
- * scan runs only on the instance consuming positions and raises through the
- * {@link AlertCoordinator} (one occurrence across replicas). Severity
- * `warning` (registry default). Dedup key `dark:<mmsi>`.
+ * scan is a tick, so it runs only on the active instance (Detector SDK), and
+ * raises through the {@link AlertKeyLock} (one occurrence even while a
+ * former active instance still ticks). The resolution is published as
+ * `alert.resolved.v1` (code `ais_resumed`) once the alert cooldown since the
+ * raise has passed. Severity `warning` (registry default). Dedup key
+ * `dark:<mmsi>`.
  *
  * @method dark.ais_gap
  * @see ../../../../../docs/METHODOLOGY.md#dark.ais_gap
@@ -90,32 +94,36 @@ export class DarkDetector implements Detector<DarkConfig> {
   constructor(
     private readonly recorder: VesselStateRecorder,
     private readonly states: VesselStateStorage,
-    private readonly coordinator: AlertCoordinator,
+    private readonly lock: AlertKeyLock,
   ) {}
 
   async onPosition(
     context: DetectorContext<DarkConfig>,
     position: VesselPosition,
   ): Promise<void> {
-    await this.coordinator.positionSeen(context.now());
     await this.recorder.observe(context, position);
     const key = darkKey(position.mmsi);
-    if (!context.alerts.isOpen(key)) return;
-    // The pipeline's `previous` is the last position before the gap (the
-    // occurrence's `openedAt` is the raise time, not the last sighting).
-    const lastSeen = position.previous?.time ?? null;
+    const open = context.alerts.get(key);
+    if (open === undefined) return;
+    // The pipeline's `previous` is the last position before the gap; without
+    // it, the occurrence's event time (the raise's `occurredAt` = last sighting).
+    const lastSeen = position.previous?.time ?? open.lastOccurredAt ?? null;
     await context.alerts.resolve(key, {
       at: position.time,
-      reason: 'AIS reports resumed',
-      data: {
+      ...resolution('ais_resumed', {
         reappearedAt: position.time.toISOString(),
         lastSeenAt: lastSeen?.toISOString() ?? null,
         gapMin:
           lastSeen === null ? null : minutesBetween(lastSeen, position.time),
         lat: position.lat,
         lon: position.lon,
-      },
+      }),
     });
+  }
+
+  /** A takeover: scan at the first tick of the active period. */
+  onActivated(): void {
+    this.lastScanAt = undefined;
   }
 
   async onTick(
@@ -130,8 +138,7 @@ export class DarkDetector implements Detector<DarkConfig> {
     ) {
       return;
     }
-    // Standbys (and an instance that lost the feed) never scan.
-    if (!this.coordinator.isActive(now)) return;
+    // A tick: the SDK runs it only on the active instance (never a standby).
     const reference = darkReferenceTime(now, context.pairs.eventTime);
     if (reference === null) return;
     this.lastScanAt = now.getTime();
@@ -175,16 +182,23 @@ export class DarkDetector implements Detector<DarkConfig> {
     if (!isDarkVessel(last, harbourDistanceM, reference, thresholds)) return;
 
     const gapMin = minutesBetween(last.time, reference);
-    await this.coordinator.exclusive(key, async () => {
-      // Another replica may have opened it (the key is aligned now).
+    const { title, message, messageKey, messageParams } = darkText({
+      mmsi: last.mmsi,
+      vesselName: context.fleet.byMmsi(last.mmsi)?.name,
+      lastSeenAt: last.time,
+      lastSogKn: last.sog,
+      gapMin,
+    });
+    await this.lock.run(key, async () => {
+      // Another instance may have opened it (the key is aligned now).
       if (context.alerts.isOpen(key)) return;
       await context.alerts.raise({
         type: DARK_ALERT,
         dedupKey: key,
         severity: 'warning',
         mmsi: last.mmsi,
-        title: `AIS gap of ${last.mmsi}`,
-        message: `Vessel ${last.mmsi} stopped reporting at ${last.time.toISOString()} while under way at ${last.sog.toFixed(1)} kn (silent for ${Math.round(gapMin)} min)`,
+        title,
+        message,
         position: last,
         occurredAt: last.time,
         data: {
@@ -194,6 +208,8 @@ export class DarkDetector implements Detector<DarkConfig> {
           gapMin,
           gapThresholdMin: context.config.GAP_MIN,
           nearestHarbourM: harbourDistanceM,
+          messageKey,
+          messageParams,
         },
       });
     });

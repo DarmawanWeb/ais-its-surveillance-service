@@ -14,7 +14,7 @@ import {
   IntersectionType,
 } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 
 import type { Plain } from '../../common/plain.js';
 
@@ -34,6 +34,16 @@ export class ListTranshipmentsQueryDto extends IntersectionType(
   @Min(100_000_000)
   @Max(999_999_999)
   readonly mmsi?: number;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'Only the analyses of this event (`TranshipmentResultDto.eventId`); without `from` / `to` ' +
+      'every analysis of the event, whatever its window',
+  })
+  @IsOptional()
+  @IsUUID()
+  readonly eventId?: string;
 }
 
 /** Share of the positive checks per priority category, percent. */
@@ -73,10 +83,10 @@ export class TranshipmentResultDto {
   @ApiProperty({ type: 'integer', description: 'Larger MMSI of the pair' })
   readonly ship2MMSI!: number;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ type: String, nullable: true })
   readonly ship1Name!: string | null;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ type: String, nullable: true })
   readonly ship2Name!: string | null;
 
   @ApiProperty({
@@ -121,12 +131,13 @@ export class TranshipmentResultDto {
   readonly status!: SurveillanceEventStatus | null;
 
   @ApiProperty({
+    type: Number,
     nullable: true,
     description: 'Midpoint of the two vessels in the middle of the window',
   })
   readonly lat!: number | null;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ type: Number, nullable: true })
   readonly lon!: number | null;
 
   @ApiProperty({ example: 'transhipment.accuracy' })

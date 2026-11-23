@@ -17,7 +17,8 @@ import {
   type LoiteringThresholds,
   trimRun,
 } from '../../domain/fishing.js';
-import { AlertCoordinator } from '../shared/alert-coordinator.js';
+import { fishingText, resolution } from '../../domain/messages.js';
+import { AlertKeyLock } from '../shared/alert-key-lock.js';
 import {
   boundedInteger,
   optionalZoneKindList,
@@ -99,10 +100,14 @@ function thresholdsOf(config: FishingConfig): LoiteringThresholds {
  * changes (mean rate ≥ 3 °/min between fixes ≥ 3 min apart) for at least
  * 30 min inside a `fishing_ground` / `restricted` zone (`FISHING_ZONE_KINDS`).
  * The run lives in memory and is rebuilt from `track_points` (where the
- * positions inside those zones are stored) after a restart. Resolved when
+ * positions inside those zones are stored) after a restart or a takeover
+ * (`onActivated` drops the runs built while another instance was active).
+ * Resolved when
  * the vessel leaves the zone or after `FISHING_RESOLVE_AFTER_MIN` without a
  * qualifying fix. Severity: `critical` in `FISHING_CRITICAL_KINDS`
- * (restricted), else `warning`. Dedup key `fishing:<mmsi>:<zoneId>`.
+ * (restricted), else `warning`. Dedup key `fishing:<mmsi>:<zoneId>`. A new
+ * occurrence opens through the `AlertKeyLock` (aligned with `events`; a
+ * position not newer than the key's last resolution opens nothing).
  *
  * @method fishing.loitering
  * @see ../../../../../docs/METHODOLOGY.md#fishing.loitering
@@ -122,7 +127,7 @@ export class FishingDetector implements Detector<FishingConfig> {
   constructor(
     private readonly recorder: VesselStateRecorder,
     private readonly tracks: TrackStorage,
-    private readonly coordinator: AlertCoordinator,
+    private readonly lock: AlertKeyLock,
   ) {}
 
   async onPosition(
@@ -131,7 +136,6 @@ export class FishingDetector implements Detector<FishingConfig> {
   ): Promise<void> {
     const { config } = context;
     const thresholds = thresholdsOf(config);
-    await this.coordinator.positionSeen(context.now());
     await this.recorder.observe(context, position);
     const zones = this.zonesOf(context, position);
 
@@ -166,28 +170,46 @@ export class FishingDetector implements Detector<FishingConfig> {
 
     const evaluation = evaluateLoitering(fixes, thresholds);
     if (evaluation.loitering) {
+      const vesselName = context.fleet.byMmsi(position.mmsi)?.name;
       for (const zone of zones) {
-        await context.alerts.raise({
-          type: FISHING_ALERT,
-          dedupKey: fishingKey(position.mmsi, zone.id),
-          severity: fishingSeverity(zone.kind, config.CRITICAL_KINDS),
+        const { title, message, messageKey, messageParams } = fishingText({
           mmsi: position.mmsi,
-          title: `Suspected fishing in ${zone.name}`,
-          message: `Vessel ${position.mmsi} loitered at ${evaluation.meanSogKn.toFixed(1)} kn with frequent course changes for ${Math.round(evaluation.durationMin)} min in ${zone.name} (${zone.kind})`,
-          position,
-          occurredAt: fixes[0]?.time ?? position.time,
-          zoneId: zone.id,
-          data: {
-            zoneKind: zone.kind,
-            zoneCode: zone.code,
-            zoneName: zone.name,
-            durationMin: evaluation.durationMin,
-            positions: evaluation.positions,
-            meanSogKn: evaluation.meanSogKn,
-            courseChangeRateDegPerMin: evaluation.courseChangeRateDegPerMin,
-            totalCourseChangeDeg: evaluation.totalCourseChangeDeg,
-          },
+          vesselName,
+          zoneName: zone.name,
+          zoneKind: zone.kind,
+          zoneCode: zone.code,
+          durationMin: evaluation.durationMin,
+          meanSogKn: evaluation.meanSogKn,
+          courseChangeRateDegPerMin: evaluation.courseChangeRateDegPerMin,
+          positions: evaluation.positions,
         });
+        await this.lock.raiseFromPosition(
+          context.alerts,
+          {
+            type: FISHING_ALERT,
+            dedupKey: fishingKey(position.mmsi, zone.id),
+            severity: fishingSeverity(zone.kind, config.CRITICAL_KINDS),
+            mmsi: position.mmsi,
+            title,
+            message,
+            position,
+            occurredAt: fixes[0]?.time ?? position.time,
+            zoneId: zone.id,
+            data: {
+              zoneKind: zone.kind,
+              zoneCode: zone.code,
+              zoneName: zone.name,
+              durationMin: evaluation.durationMin,
+              positions: evaluation.positions,
+              meanSogKn: evaluation.meanSogKn,
+              courseChangeRateDegPerMin: evaluation.courseChangeRateDegPerMin,
+              totalCourseChangeDeg: evaluation.totalCourseChangeDeg,
+              messageKey,
+              messageParams,
+            },
+          },
+          position.time,
+        );
       }
     }
 
@@ -196,15 +218,25 @@ export class FishingDetector implements Detector<FishingConfig> {
       if (open.zoneId === null || !insideIds.has(open.zoneId)) {
         await context.alerts.resolve(open.dedupKey, {
           at: position.time,
-          reason: 'left the zone',
+          ...resolution('left_zone'),
         });
       } else if (!evaluation.loitering && idle) {
         await context.alerts.resolve(open.dedupKey, {
           at: position.time,
-          reason: 'loitering pattern ended',
+          ...resolution('loitering_ended'),
         });
       }
     }
+  }
+
+  /**
+   * A takeover: the runs in memory stem from this instance's previous active
+   * period (the other instance handled the positions since). Drop them, so
+   * each vessel's run is rebuilt from `track_points` at its next position.
+   */
+  onActivated(): void {
+    this.runs.clear();
+    this.warmed.clear();
   }
 
   private zonesOf(

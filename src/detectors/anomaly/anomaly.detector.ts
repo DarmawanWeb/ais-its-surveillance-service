@@ -13,7 +13,8 @@ import {
   isSustainedAnomaly,
   nextAnomalyStreak,
 } from '../../domain/anomaly.js';
-import { AlertCoordinator } from '../shared/alert-coordinator.js';
+import { anomalyText, resolution } from '../../domain/messages.js';
+import { AlertKeyLock } from '../shared/alert-key-lock.js';
 import { boundedInteger, navStatusList } from '../shared/config-schemas.js';
 import { VesselStateStorage } from '../shared/storage.js';
 import { VesselStateRecorder } from '../shared/vessel-state.recorder.js';
@@ -55,10 +56,13 @@ const ZERO_STREAK_MEMORY_MS = 60 * 60_000;
  * `ANOMALY_MIN_POSITIONS` consecutive positions; resolved by the first
  * consistent position. The streak (capped at `ANOMALY_MIN_POSITIONS`) and the
  * event time of its last counted position live in
- * `vessel_state.anomaly_streak` / `anomaly_streak_at` (restored at startup):
+ * `vessel_state.anomaly_streak` / `anomaly_streak_at` (restored at startup
+ * and again after a takeover, since the other instance kept counting):
  * a position redelivered after a restart that is not newer than the last
  * counted one is evaluated but never counted twice. Severity `info`
- * (registry default). Dedup key `anomaly:<mmsi>`.
+ * (registry default). Dedup key `anomaly:<mmsi>`. A new occurrence opens
+ * through the `AlertKeyLock` (aligned with `events`; a position not newer
+ * than the key's last resolution opens nothing).
  *
  * @method anomaly.navstatus_mismatch
  * @see ../../../../../docs/METHODOLOGY.md#anomaly.navstatus_mismatch
@@ -78,14 +82,13 @@ export class AnomalyDetector implements Detector<AnomalyConfig> {
   constructor(
     private readonly recorder: VesselStateRecorder,
     private readonly states: VesselStateStorage,
-    private readonly coordinator: AlertCoordinator,
+    private readonly lock: AlertKeyLock,
   ) {}
 
   async onPosition(
     context: DetectorContext<AnomalyConfig>,
     position: VesselPosition,
   ): Promise<void> {
-    await this.coordinator.positionSeen(context.now());
     const { config } = context;
     const streaks = await this.loadStreaks();
     const known = streaks.get(position.mmsi);
@@ -111,36 +114,56 @@ export class AnomalyDetector implements Detector<AnomalyConfig> {
 
     const key = anomalyKey(position.mmsi);
     if (isSustainedAnomaly(streak, config.MIN_POSITIONS)) {
-      const reported = navStatusLabel(position.navstatus);
-      const predicted =
-        position.predictedNavstatus === 1 ? 'at anchor' : 'under way';
-      await context.alerts.raise({
-        type: ANOMALY_ALERT,
-        dedupKey: key,
-        severity: 'info',
+      const { title, message, messageKey, messageParams } = anomalyText({
         mmsi: position.mmsi,
-        title: `Navigational status anomaly of ${position.mmsi}`,
-        message: `Vessel ${position.mmsi} reports "${reported}" (${position.navstatus}) while its motion predicts ${predicted}, ${streak} positions in a row`,
-        position,
-        occurredAt: position.time,
-        data: {
-          navstatus: position.navstatus,
-          predictedNavstatus: position.predictedNavstatus,
-          streak,
-          minPositions: config.MIN_POSITIONS,
-          sogKn: position.sog,
-        },
+        vesselName: context.fleet.byMmsi(position.mmsi)?.name,
+        navstatus: position.navstatus,
+        navstatusLabel: navStatusLabel(position.navstatus),
+        predictedNavstatus: position.predictedNavstatus,
+        streak,
+        sogKn: position.sog,
       });
+      await this.lock.raiseFromPosition(
+        context.alerts,
+        {
+          type: ANOMALY_ALERT,
+          dedupKey: key,
+          severity: 'info',
+          mmsi: position.mmsi,
+          title,
+          message,
+          position,
+          occurredAt: position.time,
+          data: {
+            navstatus: position.navstatus,
+            predictedNavstatus: position.predictedNavstatus,
+            streak,
+            minPositions: config.MIN_POSITIONS,
+            sogKn: position.sog,
+            messageKey,
+            messageParams,
+          },
+        },
+        position.time,
+      );
     } else if (streak === 0 && context.alerts.isOpen(key)) {
       await context.alerts.resolve(key, {
         at: position.time,
-        reason: 'navigational status consistent again',
-        data: {
+        ...resolution('navstatus_consistent', {
           navstatus: position.navstatus,
           predictedNavstatus: position.predictedNavstatus,
-        },
+        }),
       });
     }
+  }
+
+  /**
+   * A takeover: the other instance kept counting streaks in `vessel_state`,
+   * so the cached ones are stale; they are loaded again with the next position.
+   */
+  onActivated(): void {
+    this.streaks = undefined;
+    this.loading = undefined;
   }
 
   /** The persisted streaks, loaded once (concurrent first calls share the query). */

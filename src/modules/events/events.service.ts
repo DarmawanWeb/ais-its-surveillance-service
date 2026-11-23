@@ -15,6 +15,7 @@ import { Injectable } from '@nestjs/common';
 import * as z from 'zod';
 
 import { eventVisibility } from '../../tenancy/event-visibility.js';
+import { eventDataOf, eventResolutionOf } from './event-text.js';
 import type {
   ListEventsQueryDto,
   ReviewEventDto,
@@ -44,10 +45,15 @@ export class SurveillanceEventNotFoundError extends NotFoundError {
   }
 }
 
-/** API form of an event record. */
+/**
+ * API form of an event record: `data` with its message key and parameters,
+ * `resolution` with its stable code (both derived for older rows).
+ */
 export function toEventDto(record: EventRecord): SurveillanceEventView {
   return {
     ...record,
+    data: eventDataOf(record),
+    resolution: eventResolutionOf(record),
     time: record.time.toISOString(),
     openedAt: record.openedAt.toISOString(),
     lastSeenAt: record.lastSeenAt.toISOString(),
@@ -83,6 +89,9 @@ export class EventsService {
         status: query.status,
         mmsi: query.mmsi,
         bbox: bboxOf(query),
+        active: query.active,
+        zoneId: query.zoneId,
+        vesselSearch: query.q,
       },
       decodeQueryCursor(query, EventCursorSchema),
       query.limit + 1,

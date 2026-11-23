@@ -14,16 +14,19 @@ import {
   ApiPropertyOptional,
   IntersectionType,
 } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsIn,
   IsInt,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
   Max,
   MaxLength,
   Min,
+  MinLength,
 } from 'class-validator';
 
 import type { Plain } from '../../common/plain.js';
@@ -71,6 +74,45 @@ export class ListEventsQueryDto extends IntersectionType(
   @Min(100_000_000)
   @Max(999_999_999)
   readonly mmsi?: number;
+
+  @ApiPropertyOptional({
+    type: Boolean,
+    description:
+      'Detector lifecycle, apart from the review `status`: `true` = the occurrence is still open ' +
+      '(`resolvedAt` null, e.g. still dark), `false` = the detector ended it (e.g. reappeared)',
+  })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) =>
+    value === 'true' ? true : value === 'false' ? false : value,
+  )
+  @IsBoolean()
+  readonly active?: boolean;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description: 'Only events of this zone (geofence, fishing)',
+  })
+  @IsOptional()
+  @IsUUID()
+  readonly zoneId?: string;
+
+  @ApiPropertyOptional({
+    minLength: 2,
+    maxLength: 100,
+    description:
+      'Vessel search: part of the name of the vessel or the related vessel (case-insensitive), ' +
+      'or the leading digits of an MMSI; 2–100 characters once surrounding spaces are trimmed',
+    example: 'mandiri',
+  })
+  @IsOptional()
+  // Trimmed before validation: a blank value is refused, never ignored.
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  readonly q?: string;
 }
 
 /** Body of `PATCH /surveillance/events/:id`. */
@@ -96,8 +138,12 @@ export class ReviewEventDto {
   readonly note?: string | null;
 }
 
-/** A surveillance event (`events` row) as returned by the API. */
-export class SurveillanceEventDto {
+/**
+ * The fields every surveillance event has (`events` row with the names
+ * joined from the projections). The API returns one of the per-type
+ * schemas (`event-variants.dto.ts`), discriminated by `type`.
+ */
+export abstract class SurveillanceEventBaseDto {
   @ApiProperty({ format: 'uuid', description: 'Event id = alert id' })
   readonly id!: string;
 
@@ -106,9 +152,6 @@ export class SurveillanceEventDto {
 
   @ApiProperty({ example: 'transhipment' })
   readonly detector!: string;
-
-  @ApiProperty({ example: 'transhipment' })
-  readonly type!: string;
 
   @ApiProperty({ enum: ['safety', 'surveillance'] })
   readonly domain!: 'safety' | 'surveillance';
@@ -129,33 +172,38 @@ export class SurveillanceEventDto {
   readonly relatedMmsi!: number | null;
 
   @ApiProperty({
+    type: String,
     nullable: true,
     description: 'Vessel name from the fleet projection',
   })
   readonly vesselName!: string | null;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ type: String, nullable: true })
   readonly relatedVesselName!: string | null;
 
-  @ApiProperty({ format: 'uuid', nullable: true })
+  @ApiProperty({ type: String, format: 'uuid', nullable: true })
   readonly zoneId!: string | null;
 
   @ApiProperty({
+    type: String,
     nullable: true,
     description: 'Zone name from the GEO projection',
   })
   readonly zoneName!: string | null;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ type: Number, nullable: true })
   readonly lat!: number | null;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ type: Number, nullable: true })
   readonly lon!: number | null;
 
-  @ApiProperty()
+  @ApiProperty({
+    description:
+      'English headline (`data.messageKey` / `messageParams` localize it)',
+  })
   readonly title!: string;
 
-  @ApiProperty()
+  @ApiProperty({ description: 'English sentence (see `title`)' })
   readonly message!: string;
 
   @ApiProperty({
@@ -167,35 +215,36 @@ export class SurveillanceEventDto {
   @ApiProperty({ example: 'transhipment:525000001:525000002' })
   readonly dedupKey!: string;
 
-  @ApiProperty({ type: 'object', additionalProperties: true })
-  readonly data!: Record<string, unknown>;
-
-  @ApiProperty({ enum: SURVEILLANCE_EVENT_STATUSES })
+  @ApiProperty({
+    enum: SURVEILLANCE_EVENT_STATUSES,
+    description: 'Review status (the detector lifecycle is `resolvedAt`)',
+  })
   readonly status!: SurveillanceEventStatus;
 
   @ApiProperty({ format: 'date-time' })
   readonly openedAt!: string;
 
-  @ApiProperty({ format: 'date-time' })
+  @ApiProperty({
+    format: 'date-time',
+    description: "Event time of the occurrence's latest signal",
+  })
   readonly lastSeenAt!: string;
 
   @ApiProperty({
+    type: String,
     format: 'date-time',
     nullable: true,
     description: 'When the detector ended the occurrence',
   })
   readonly resolvedAt!: string | null;
 
-  @ApiProperty({ type: 'object', additionalProperties: true, nullable: true })
-  readonly resolution!: Record<string, unknown> | null;
-
-  @ApiProperty({ format: 'uuid', nullable: true })
+  @ApiProperty({ type: String, format: 'uuid', nullable: true })
   readonly reviewedBy!: string | null;
 
-  @ApiProperty({ format: 'date-time', nullable: true })
+  @ApiProperty({ type: String, format: 'date-time', nullable: true })
   readonly reviewedAt!: string | null;
 
-  @ApiProperty({ nullable: true })
+  @ApiProperty({ type: String, nullable: true })
   readonly note!: string | null;
 
   @ApiProperty({
@@ -205,5 +254,12 @@ export class SurveillanceEventDto {
   readonly createdAt!: string;
 }
 
-/** Plain response shape of {@link SurveillanceEventDto}. */
-export type SurveillanceEventView = Plain<SurveillanceEventDto>;
+/**
+ * Plain response shape of a surveillance event: the common fields plus the
+ * per-type `type`, `data` and `resolution` (`event-variants.dto.ts`).
+ */
+export type SurveillanceEventView = Plain<SurveillanceEventBaseDto> & {
+  readonly type: string;
+  readonly data: Record<string, unknown>;
+  readonly resolution: Record<string, unknown> | null;
+};

@@ -4,29 +4,18 @@ import {
   type Principal,
   RequirePermissions,
 } from '@darmawanweb/ais-its-nest/auth';
-import { ApiCursorResponse } from '@darmawanweb/ais-its-nest/http';
-import {
-  Body,
-  Controller,
-  Get,
-  Param,
-  ParseUUIDPipe,
-  Patch,
-  Query,
-  Req,
-} from '@nestjs/common';
-import {
-  ApiOkResponse,
-  ApiOperation,
-  ApiParam,
-  ApiTags,
-} from '@nestjs/swagger';
+import { UuidParam } from '@darmawanweb/ais-its-nest/http';
+import { Body, Controller, Get, Patch, Query, Req } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { FastifyRequest } from 'fastify';
 
 import {
+  ApiSurveillanceEventPage,
+  ApiSurveillanceEventResponse,
+} from './event-variants.dto.js';
+import {
   ListEventsQueryDto,
   ReviewEventDto,
-  SurveillanceEventDto,
   type SurveillanceEventView,
 } from './events.dto.js';
 import { EventsService } from './events.service.js';
@@ -41,8 +30,12 @@ export class EventsController {
   @ApiOperation({
     summary:
       'Surveillance events, newest first (tenancy: own vessels unless authority)',
+    description:
+      'Filters combine with AND; `active` selects by the detector lifecycle (`resolvedAt`), ' +
+      '`status` by the review. Each event has `data.messageKey` / `messageParams` for a ' +
+      'localized title and, once ended, `resolution.code`.',
   })
-  @ApiCursorResponse(SurveillanceEventDto)
+  @ApiSurveillanceEventPage()
   list(
     @CurrentPrincipal() principal: Principal,
     @Query() query: ListEventsQueryDto,
@@ -53,11 +46,10 @@ export class EventsController {
   @Get(':id')
   @RequirePermissions('surveillance:read')
   @ApiOperation({ summary: 'One surveillance event' })
-  @ApiParam({ name: 'id', format: 'uuid' })
-  @ApiOkResponse({ type: SurveillanceEventDto })
+  @ApiSurveillanceEventResponse()
   get(
     @CurrentPrincipal() principal: Principal,
-    @Param('id', new ParseUUIDPipe()) id: string,
+    @UuidParam() id: string,
   ): Promise<SurveillanceEventView> {
     return this.events.get(principal, id);
   }
@@ -67,11 +59,10 @@ export class EventsController {
   @ApiOperation({
     summary: 'Review an event: confirm, dismiss or reopen it, with a note',
   })
-  @ApiParam({ name: 'id', format: 'uuid' })
-  @ApiOkResponse({ type: SurveillanceEventDto })
+  @ApiSurveillanceEventResponse('The reviewed event')
   review(
     @CurrentPrincipal() principal: Principal,
-    @Param('id', new ParseUUIDPipe()) id: string,
+    @UuidParam() id: string,
     @Body() body: ReviewEventDto,
     @Req() request: FastifyRequest,
   ): Promise<SurveillanceEventView> {

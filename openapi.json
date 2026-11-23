@@ -35,6 +35,7 @@
     },
     "/api/v2/surveillance/detectors": {
       "get": {
+        "description": "`thresholds` lists the active `<ID>_*` configuration with a unit and a description per key; `config` is the same map without them (kept for older clients).",
         "operationId": "DetectorsController_list",
         "parameters": [],
         "responses": {
@@ -45,7 +46,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/DetectorDescriptionDto"
+                    "$ref": "#/components/schemas/SurveillanceDetectorDto"
                   }
                 }
               }
@@ -73,6 +74,7 @@
     },
     "/api/v2/surveillance/events": {
       "get": {
+        "description": "Filters combine with AND; `active` selects by the detector lifecycle (`resolvedAt`), `status` by the review. Each event has `data.messageKey` / `messageParams` for a localized title and, once ended, `resolution.code`.",
         "operationId": "EventsController_list",
         "parameters": [
           {
@@ -172,11 +174,42 @@
               "example": 525005223,
               "type": "integer"
             }
+          },
+          {
+            "name": "active",
+            "required": false,
+            "in": "query",
+            "description": "Detector lifecycle, apart from the review `status`: `true` = the occurrence is still open (`resolvedAt` null, e.g. still dark), `false` = the detector ended it (e.g. reappeared)",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "zoneId",
+            "required": false,
+            "in": "query",
+            "description": "Only events of this zone (geofence, fishing)",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "required": false,
+            "in": "query",
+            "description": "Vessel search: part of the name of the vessel or the related vessel (case-insensitive), or the leading digits of an MMSI; 2–100 characters once surrounding spaces are trimmed",
+            "schema": {
+              "minLength": 2,
+              "maxLength": 100,
+              "example": "mandiri",
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "One page of the time-ordered list",
+            "description": "One page of events, newest first; each item one schema per alert type, discriminated by `type`",
             "content": {
               "application/json": {
                 "schema": {
@@ -189,7 +222,33 @@
                     "data": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/SurveillanceEventDto"
+                        "oneOf": [
+                          {
+                            "$ref": "#/components/schemas/TranshipmentEventDto"
+                          },
+                          {
+                            "$ref": "#/components/schemas/AnomalyEventDto"
+                          },
+                          {
+                            "$ref": "#/components/schemas/DarkEventDto"
+                          },
+                          {
+                            "$ref": "#/components/schemas/GeofenceEventDto"
+                          },
+                          {
+                            "$ref": "#/components/schemas/FishingEventDto"
+                          }
+                        ],
+                        "discriminator": {
+                          "propertyName": "type",
+                          "mapping": {
+                            "transhipment": "#/components/schemas/TranshipmentEventDto",
+                            "anomaly": "#/components/schemas/AnomalyEventDto",
+                            "dark": "#/components/schemas/DarkEventDto",
+                            "geofence": "#/components/schemas/GeofenceEventDto",
+                            "fishing": "#/components/schemas/FishingEventDto"
+                          }
+                        }
                       }
                     },
                     "page": {
@@ -228,19 +287,46 @@
             "name": "id",
             "required": true,
             "in": "path",
+            "description": "UUID",
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "The event: one schema per alert type, discriminated by `type`",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SurveillanceEventDto"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/TranshipmentEventDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AnomalyEventDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DarkEventDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GeofenceEventDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/FishingEventDto"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "type",
+                    "mapping": {
+                      "transhipment": "#/components/schemas/TranshipmentEventDto",
+                      "anomaly": "#/components/schemas/AnomalyEventDto",
+                      "dark": "#/components/schemas/DarkEventDto",
+                      "geofence": "#/components/schemas/GeofenceEventDto",
+                      "fishing": "#/components/schemas/FishingEventDto"
+                    }
+                  }
                 }
               }
             }
@@ -271,9 +357,10 @@
             "name": "id",
             "required": true,
             "in": "path",
+            "description": "UUID",
             "schema": {
-              "format": "uuid",
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -289,11 +376,37 @@
         },
         "responses": {
           "200": {
-            "description": "",
+            "description": "The reviewed event",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SurveillanceEventDto"
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/TranshipmentEventDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/AnomalyEventDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/DarkEventDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/GeofenceEventDto"
+                    },
+                    {
+                      "$ref": "#/components/schemas/FishingEventDto"
+                    }
+                  ],
+                  "discriminator": {
+                    "propertyName": "type",
+                    "mapping": {
+                      "transhipment": "#/components/schemas/TranshipmentEventDto",
+                      "anomaly": "#/components/schemas/AnomalyEventDto",
+                      "dark": "#/components/schemas/DarkEventDto",
+                      "geofence": "#/components/schemas/GeofenceEventDto",
+                      "fishing": "#/components/schemas/FishingEventDto"
+                    }
+                  }
                 }
               }
             }
@@ -370,6 +483,16 @@
             "description": "Only pairs with this vessel (legacy GET /results/:mmsi); `from` / `to` select by window start",
             "schema": {
               "type": "integer"
+            }
+          },
+          {
+            "name": "eventId",
+            "required": false,
+            "in": "query",
+            "description": "Only the analyses of this event (`TranshipmentResultDto.eventId`); without `from` / `to` every analysis of the event, whatever its window",
+            "schema": {
+              "format": "uuid",
+              "type": "string"
             }
           }
         ],
@@ -563,6 +686,100 @@
         ]
       }
     },
+    "/api/v2/surveillance/stats/series": {
+      "get": {
+        "description": "Every bucket of the range in order (empty ones with zero counts); the first bucket starts at `from`, the last ends at `to`. Buckets follow daylight saving time of `tz`: a repeated hour is two buckets, a skipped hour none, a day lasts 23 to 25 hours. Tenancy as `GET /surveillance/stats`.",
+        "operationId": "StatisticsController_series",
+        "parameters": [
+          {
+            "name": "from",
+            "required": false,
+            "in": "query",
+            "description": "Start (ISO-8601); default: endpoint specific",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "required": false,
+            "in": "query",
+            "description": "End (ISO-8601); default: now",
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "name": "bucket",
+            "required": false,
+            "in": "query",
+            "description": "Bucket size (at most 1000 buckets per request)",
+            "schema": {
+              "default": "day",
+              "type": "string",
+              "enum": [
+                "hour",
+                "day"
+              ]
+            }
+          },
+          {
+            "name": "tz",
+            "required": false,
+            "in": "query",
+            "description": "IANA time zone name of the bucket boundaries (local hours and days, e.g. WIB), any case; the response echoes the database spelling. UTC offsets such as `+07:00` are refused (use `Etc/GMT-7`), and so are names the database does not know (`400 VALIDATION_FAILED`)",
+            "schema": {
+              "maxLength": 64,
+              "pattern": "^[A-Za-z][A-Za-z0-9_+-]*(?:/[A-Za-z0-9_+-]+)*$",
+              "default": "UTC",
+              "example": "Asia/Jakarta",
+              "type": "string"
+            }
+          },
+          {
+            "name": "type",
+            "required": false,
+            "in": "query",
+            "description": "Alert type (default: every type)",
+            "schema": {
+              "example": "dark",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SurveillanceStatsSeriesDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Event counts by type and severity per hour or day of a time zone (one query for a chart)",
+        "tags": [
+          "statistics"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      }
+    },
     "/api/v2/surveillance/fishing-violations": {
       "get": {
         "operationId": "FishingViolationsController_list",
@@ -573,6 +790,7 @@
             "in": "query",
             "schema": {
               "minimum": 1,
+              "maximum": 1000000,
               "default": 1,
               "type": "integer"
             }
@@ -653,12 +871,115 @@
           "surveillance:read"
         ]
       }
+    },
+    "/api/v2/surveillance/fishing-violations/years": {
+      "get": {
+        "operationId": "FishingViolationsController_years",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishingViolationYearsDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Historical illegal-fishing records per year (year facets)",
+        "tags": [
+          "fishing-violations"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      }
+    },
+    "/api/v2/surveillance/fishing-violations/heatmap": {
+      "get": {
+        "operationId": "FishingViolationsController_heatmap",
+        "parameters": [
+          {
+            "name": "bbox",
+            "required": false,
+            "in": "query",
+            "description": "minLon,minLat,maxLon,maxLat (WGS 84 degrees)",
+            "schema": {
+              "example": "95,-11,141,6",
+              "type": "string"
+            }
+          },
+          {
+            "name": "year",
+            "required": false,
+            "in": "query",
+            "description": "Only this year (default: every year)",
+            "schema": {
+              "example": 2016,
+              "type": "integer"
+            }
+          },
+          {
+            "name": "cellKm",
+            "required": false,
+            "in": "query",
+            "description": "Cell size, kilometres (converted to degrees at 111.32 km/°)",
+            "schema": {
+              "minimum": 0.5,
+              "maximum": 500,
+              "default": 10,
+              "type": "number"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FishingViolationHeatmapDto"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Problem details (RFC 9457)",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "summary": "Historical illegal-fishing records per grid cell (ST_SnapToGrid, cell size in km): the heat layer",
+        "tags": [
+          "fishing-violations"
+        ],
+        "x-required-permissions": [
+          "surveillance:read"
+        ]
+      }
     }
   },
   "info": {
     "title": "AIS Maritime Intelligence — AIS ITS Surveillance Service",
     "description": "Illegal-activity analytics on the Detector SDK: illegal transhipment, navstatus anomaly, dark vessels, geofence violations and fishing loitering",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "contact": {}
   },
   "tags": [
@@ -769,7 +1090,9 @@
               "telemetry",
               "geo",
               "safety",
-              "surveillance"
+              "surveillance",
+              "notification",
+              "security"
             ],
             "nullable": true
           },
@@ -787,6 +1110,7 @@
             "enum": [
               "implemented",
               "planned",
+              "not_implemented",
               "deprecated"
             ],
             "nullable": true
@@ -831,7 +1155,71 @@
           "methods"
         ]
       },
-      "DetectorDescriptionDto": {
+      "DetectorThresholdDto": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "example": "ACCURACY_THRESHOLD",
+            "description": "Configuration key (the variable is `<DETECTOR ID>_<KEY>`, e.g. TRANSHIPMENT_ACCURACY_THRESHOLD)"
+          },
+          "value": {
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ]
+                }
+              }
+            ],
+            "example": 70,
+            "description": "Active value"
+          },
+          "unit": {
+            "type": "string",
+            "enum": [
+              "m",
+              "km",
+              "s",
+              "min",
+              "h",
+              "kn",
+              "percent",
+              "deg_per_min",
+              "count"
+            ],
+            "nullable": true,
+            "description": "Unit (null for lists, flags and plain numbers)"
+          },
+          "description": {
+            "type": "string",
+            "example": "Minimum score of an illegal transhipment"
+          }
+        },
+        "required": [
+          "key",
+          "value",
+          "unit",
+          "description"
+        ]
+      },
+      "SurveillanceDetectorDto": {
         "type": "object",
         "properties": {
           "id": {
@@ -885,6 +1273,13 @@
             "type": "integer",
             "nullable": true,
             "description": "Tick interval of `onTick`, ms; null without ticks"
+          },
+          "thresholds": {
+            "description": "The active configuration with units and descriptions (empty while disabled)",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DetectorThresholdDto"
+            }
           }
         },
         "required": [
@@ -894,10 +1289,178 @@
           "alertTypes",
           "enabled",
           "config",
-          "tickIntervalMs"
+          "tickIntervalMs",
+          "thresholds"
         ]
       },
-      "SurveillanceEventDto": {
+      "PriorityDistributionDto": {
+        "type": "object",
+        "properties": {
+          "low": {
+            "type": "number",
+            "description": "P < 6, percent"
+          },
+          "medium": {
+            "type": "number",
+            "description": "6 ≤ P < 18, percent"
+          },
+          "high": {
+            "type": "number",
+            "description": "P ≥ 18, percent"
+          }
+        },
+        "required": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "TranshipmentEventDataDto": {
+        "type": "object",
+        "properties": {
+          "messageParams": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "description": "Parameters of the sentence (vessel and zone names, MMSIs, metres, minutes, knots)",
+            "example": {
+              "mmsi": 525005223,
+              "vesselName": "KM Mandiri 777"
+            }
+          },
+          "messageKey": {
+            "type": "string",
+            "enum": [
+              "surveillance.transhipment.suspected"
+            ],
+            "description": "Stable message key `surveillance.<detector>.<situation>` of the title and message (README \"Messages\"); rows written before 0.2.0 get it derived on read"
+          },
+          "isIllegal": {
+            "type": "boolean",
+            "description": "Always true: only positive analyses raise"
+          },
+          "accuracy": {
+            "type": "number",
+            "description": "Score 0–100 (transhipment.accuracy)"
+          },
+          "startTimestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window start"
+          },
+          "endTimestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window end"
+          },
+          "averagePriority": {
+            "type": "number",
+            "description": "Mean product priority of the positive checks"
+          },
+          "priorityDistribution": {
+            "$ref": "#/components/schemas/PriorityDistributionDto"
+          },
+          "accuracyThreshold": {
+            "type": "number",
+            "description": "TRANSHIPMENT_ACCURACY_THRESHOLD of the analysis, percent"
+          },
+          "accumulatedPriority": {
+            "type": "number",
+            "description": "Accumulated candidate priority of the pair when analysed"
+          },
+          "observations": {
+            "type": "integer",
+            "description": "Candidate observations of the pair"
+          },
+          "lastDistanceM": {
+            "type": "number",
+            "nullable": true,
+            "description": "Distance of the last observation, metres"
+          },
+          "route1Points": {
+            "type": "integer",
+            "description": "Track fixes of ship 1"
+          },
+          "route2Points": {
+            "type": "integer",
+            "description": "Track fixes of ship 2"
+          },
+          "methodIds": {
+            "description": "Methodology ids of the detection chain",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "legacy": {
+            "type": "boolean",
+            "description": "Imported from the legacy MVP (the fields it did not store are absent)"
+          }
+        },
+        "required": [
+          "messageParams",
+          "messageKey",
+          "isIllegal",
+          "accuracy",
+          "startTimestamp",
+          "endTimestamp",
+          "averagePriority",
+          "priorityDistribution",
+          "methodIds"
+        ]
+      },
+      "TranshipmentResolutionDto": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "English reason (kept for older clients; translate `code`)"
+          },
+          "supersededBy": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`escalated`: the alert of the same occurrence that superseded this one"
+          },
+          "duplicateOf": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A duplicate open row of the same `dedupKey` (opened by a second writer during a failover) ended together with this alert of the occurrence"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "escalated",
+              "analysis_negative",
+              "pair_separated",
+              "legacy_import",
+              "other"
+            ],
+            "description": "Stable code of the reason (README \"Resolution codes\"; all codes: escalated, ais_resumed, navstatus_consistent, left_zone, loitering_ended, analysis_negative, pair_separated, zone_deleted, zone_no_longer_alerts, legacy_import, other)"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "`pair_separated`: when the pair was last observed together"
+          }
+        },
+        "required": [
+          "reason",
+          "code"
+        ]
+      },
+      "TranshipmentEventDto": {
         "type": "object",
         "properties": {
           "id": {
@@ -911,10 +1474,6 @@
             "description": "When it happened"
           },
           "detector": {
-            "type": "string",
-            "example": "transhipment"
-          },
-          "type": {
             "type": "string",
             "example": "transhipment"
           },
@@ -952,37 +1511,39 @@
             "nullable": true
           },
           "vesselName": {
-            "type": "object",
+            "type": "string",
             "nullable": true,
             "description": "Vessel name from the fleet projection"
           },
           "relatedVesselName": {
-            "type": "object",
+            "type": "string",
             "nullable": true
           },
           "zoneId": {
-            "type": "object",
+            "type": "string",
             "format": "uuid",
             "nullable": true
           },
           "zoneName": {
-            "type": "object",
+            "type": "string",
             "nullable": true,
             "description": "Zone name from the GEO projection"
           },
           "lat": {
-            "type": "object",
+            "type": "number",
             "nullable": true
           },
           "lon": {
-            "type": "object",
+            "type": "number",
             "nullable": true
           },
           "title": {
-            "type": "string"
+            "type": "string",
+            "description": "English headline (`data.messageKey` / `messageParams` localize it)"
           },
           "message": {
-            "type": "string"
+            "type": "string",
+            "description": "English sentence (see `title`)"
           },
           "methodId": {
             "type": "string",
@@ -993,10 +1554,6 @@
             "type": "string",
             "example": "transhipment:525000001:525000002"
           },
-          "data": {
-            "type": "object",
-            "additionalProperties": true
-          },
           "status": {
             "type": "string",
             "enum": [
@@ -1004,7 +1561,8 @@
               "confirmed",
               "dismissed",
               "resolved"
-            ]
+            ],
+            "description": "Review status (the detector lifecycle is `resolvedAt`)"
           },
           "openedAt": {
             "type": "string",
@@ -1012,44 +1570,57 @@
           },
           "lastSeenAt": {
             "type": "string",
-            "format": "date-time"
+            "format": "date-time",
+            "description": "Event time of the occurrence's latest signal"
           },
           "resolvedAt": {
-            "type": "object",
+            "type": "string",
             "format": "date-time",
             "nullable": true,
             "description": "When the detector ended the occurrence"
           },
-          "resolution": {
-            "type": "object",
-            "additionalProperties": true,
-            "nullable": true
-          },
           "reviewedBy": {
-            "type": "object",
+            "type": "string",
             "format": "uuid",
             "nullable": true
           },
           "reviewedAt": {
-            "type": "object",
+            "type": "string",
             "format": "date-time",
             "nullable": true
           },
           "note": {
-            "type": "object",
+            "type": "string",
             "nullable": true
           },
           "createdAt": {
             "type": "string",
             "format": "date-time",
             "description": "When the event was recorded"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "transhipment"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/TranshipmentEventDataDto"
+          },
+          "resolution": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TranshipmentResolutionDto"
+              }
+            ]
           }
         },
         "required": [
           "id",
           "time",
           "detector",
-          "type",
           "domain",
           "severity",
           "currentSeverity",
@@ -1065,16 +1636,1237 @@
           "message",
           "methodId",
           "dedupKey",
-          "data",
           "status",
           "openedAt",
           "lastSeenAt",
           "resolvedAt",
-          "resolution",
           "reviewedBy",
           "reviewedAt",
           "note",
-          "createdAt"
+          "createdAt",
+          "type",
+          "data",
+          "resolution"
+        ]
+      },
+      "AnomalyEventDataDto": {
+        "type": "object",
+        "properties": {
+          "messageParams": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "description": "Parameters of the sentence (vessel and zone names, MMSIs, metres, minutes, knots)",
+            "example": {
+              "mmsi": 525005223,
+              "vesselName": "KM Mandiri 777"
+            }
+          },
+          "messageKey": {
+            "type": "string",
+            "enum": [
+              "surveillance.anomaly.navstatus_mismatch"
+            ],
+            "description": "Stable message key `surveillance.<detector>.<situation>` of the title and message (README \"Messages\"); rows written before 0.2.0 get it derived on read"
+          },
+          "navstatus": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 15,
+            "description": "Reported AIS navigational status"
+          },
+          "predictedNavstatus": {
+            "type": "number",
+            "enum": [
+              0,
+              1
+            ],
+            "description": "Predicted status: 0 under way, 1 at anchor"
+          },
+          "streak": {
+            "type": "integer",
+            "description": "Consecutive anomalous positions"
+          },
+          "minPositions": {
+            "type": "integer",
+            "description": "ANOMALY_MIN_POSITIONS"
+          },
+          "sogKn": {
+            "type": "number",
+            "description": "Speed over ground, knots"
+          }
+        },
+        "required": [
+          "messageParams",
+          "messageKey",
+          "navstatus",
+          "predictedNavstatus",
+          "streak",
+          "minPositions",
+          "sogKn"
+        ]
+      },
+      "AnomalyResolutionDto": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "English reason (kept for older clients; translate `code`)"
+          },
+          "supersededBy": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`escalated`: the alert of the same occurrence that superseded this one"
+          },
+          "duplicateOf": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A duplicate open row of the same `dedupKey` (opened by a second writer during a failover) ended together with this alert of the occurrence"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "escalated",
+              "navstatus_consistent",
+              "other"
+            ],
+            "description": "Stable code of the reason (README \"Resolution codes\"; all codes: escalated, ais_resumed, navstatus_consistent, left_zone, loitering_ended, analysis_negative, pair_separated, zone_deleted, zone_no_longer_alerts, legacy_import, other)"
+          },
+          "navstatus": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 15
+          },
+          "predictedNavstatus": {
+            "type": "number",
+            "enum": [
+              0,
+              1
+            ]
+          }
+        },
+        "required": [
+          "reason",
+          "code"
+        ]
+      },
+      "AnomalyEventDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Event id = alert id"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it happened"
+          },
+          "detector": {
+            "type": "string",
+            "example": "transhipment"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "safety",
+              "surveillance"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Published severity"
+          },
+          "currentSeverity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Current severity of the occurrence"
+          },
+          "mmsi": {
+            "type": "integer",
+            "example": 525005223
+          },
+          "relatedMmsi": {
+            "type": "integer",
+            "nullable": true
+          },
+          "vesselName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Vessel name from the fleet projection"
+          },
+          "relatedVesselName": {
+            "type": "string",
+            "nullable": true
+          },
+          "zoneId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "zoneName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Zone name from the GEO projection"
+          },
+          "lat": {
+            "type": "number",
+            "nullable": true
+          },
+          "lon": {
+            "type": "number",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "description": "English headline (`data.messageKey` / `messageParams` localize it)"
+          },
+          "message": {
+            "type": "string",
+            "description": "English sentence (see `title`)"
+          },
+          "methodId": {
+            "type": "string",
+            "example": "transhipment.accuracy",
+            "description": "Methodology catalog id (spec §17)"
+          },
+          "dedupKey": {
+            "type": "string",
+            "example": "transhipment:525000001:525000002"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "confirmed",
+              "dismissed",
+              "resolved"
+            ],
+            "description": "Review status (the detector lifecycle is `resolvedAt`)"
+          },
+          "openedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event time of the occurrence's latest signal"
+          },
+          "resolvedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the detector ended the occurrence"
+          },
+          "reviewedBy": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "reviewedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "note": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the event was recorded"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "anomaly"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/AnomalyEventDataDto"
+          },
+          "resolution": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AnomalyResolutionDto"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "time",
+          "detector",
+          "domain",
+          "severity",
+          "currentSeverity",
+          "mmsi",
+          "relatedMmsi",
+          "vesselName",
+          "relatedVesselName",
+          "zoneId",
+          "zoneName",
+          "lat",
+          "lon",
+          "title",
+          "message",
+          "methodId",
+          "dedupKey",
+          "status",
+          "openedAt",
+          "lastSeenAt",
+          "resolvedAt",
+          "reviewedBy",
+          "reviewedAt",
+          "note",
+          "createdAt",
+          "type",
+          "data",
+          "resolution"
+        ]
+      },
+      "DarkEventDataDto": {
+        "type": "object",
+        "properties": {
+          "messageParams": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "description": "Parameters of the sentence (vessel and zone names, MMSIs, metres, minutes, knots)",
+            "example": {
+              "mmsi": 525005223,
+              "vesselName": "KM Mandiri 777"
+            }
+          },
+          "messageKey": {
+            "type": "string",
+            "enum": [
+              "surveillance.dark.ais_gap"
+            ],
+            "description": "Stable message key `surveillance.<detector>.<situation>` of the title and message (README \"Messages\"); rows written before 0.2.0 get it derived on read"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last position before the gap"
+          },
+          "lastSogKn": {
+            "type": "number",
+            "description": "Last speed over ground, knots"
+          },
+          "lastCogDeg": {
+            "type": "number",
+            "description": "Last course over ground, degrees"
+          },
+          "gapMin": {
+            "type": "number",
+            "description": "Silence when reported, minutes"
+          },
+          "gapThresholdMin": {
+            "type": "integer",
+            "description": "DARK_GAP_MIN"
+          },
+          "nearestHarbourM": {
+            "type": "number",
+            "nullable": true,
+            "description": "Distance to the nearest global port / anchorage within DARK_HARBOUR_DISTANCE_KM, metres (null: none)"
+          }
+        },
+        "required": [
+          "messageParams",
+          "messageKey",
+          "lastSeenAt",
+          "lastSogKn",
+          "lastCogDeg",
+          "gapMin",
+          "gapThresholdMin",
+          "nearestHarbourM"
+        ]
+      },
+      "DarkResolutionDto": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "English reason (kept for older clients; translate `code`)"
+          },
+          "supersededBy": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`escalated`: the alert of the same occurrence that superseded this one"
+          },
+          "duplicateOf": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A duplicate open row of the same `dedupKey` (opened by a second writer during a failover) ended together with this alert of the occurrence"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "escalated",
+              "ais_resumed",
+              "other"
+            ],
+            "description": "Stable code of the reason (README \"Resolution codes\"; all codes: escalated, ais_resumed, navstatus_consistent, left_zone, loitering_ended, analysis_negative, pair_separated, zone_deleted, zone_no_longer_alerts, legacy_import, other)"
+          },
+          "reappearedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "First position after the gap"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Last position before the gap"
+          },
+          "gapMin": {
+            "type": "number",
+            "nullable": true,
+            "description": "Length of the gap, minutes"
+          },
+          "lat": {
+            "type": "number",
+            "description": "Latitude where it reappeared"
+          },
+          "lon": {
+            "type": "number",
+            "description": "Longitude where it reappeared"
+          }
+        },
+        "required": [
+          "reason",
+          "code"
+        ]
+      },
+      "DarkEventDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Event id = alert id"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it happened"
+          },
+          "detector": {
+            "type": "string",
+            "example": "transhipment"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "safety",
+              "surveillance"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Published severity"
+          },
+          "currentSeverity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Current severity of the occurrence"
+          },
+          "mmsi": {
+            "type": "integer",
+            "example": 525005223
+          },
+          "relatedMmsi": {
+            "type": "integer",
+            "nullable": true
+          },
+          "vesselName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Vessel name from the fleet projection"
+          },
+          "relatedVesselName": {
+            "type": "string",
+            "nullable": true
+          },
+          "zoneId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "zoneName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Zone name from the GEO projection"
+          },
+          "lat": {
+            "type": "number",
+            "nullable": true
+          },
+          "lon": {
+            "type": "number",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "description": "English headline (`data.messageKey` / `messageParams` localize it)"
+          },
+          "message": {
+            "type": "string",
+            "description": "English sentence (see `title`)"
+          },
+          "methodId": {
+            "type": "string",
+            "example": "transhipment.accuracy",
+            "description": "Methodology catalog id (spec §17)"
+          },
+          "dedupKey": {
+            "type": "string",
+            "example": "transhipment:525000001:525000002"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "confirmed",
+              "dismissed",
+              "resolved"
+            ],
+            "description": "Review status (the detector lifecycle is `resolvedAt`)"
+          },
+          "openedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event time of the occurrence's latest signal"
+          },
+          "resolvedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the detector ended the occurrence"
+          },
+          "reviewedBy": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "reviewedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "note": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the event was recorded"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "dark"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/DarkEventDataDto"
+          },
+          "resolution": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/DarkResolutionDto"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "time",
+          "detector",
+          "domain",
+          "severity",
+          "currentSeverity",
+          "mmsi",
+          "relatedMmsi",
+          "vesselName",
+          "relatedVesselName",
+          "zoneId",
+          "zoneName",
+          "lat",
+          "lon",
+          "title",
+          "message",
+          "methodId",
+          "dedupKey",
+          "status",
+          "openedAt",
+          "lastSeenAt",
+          "resolvedAt",
+          "reviewedBy",
+          "reviewedAt",
+          "note",
+          "createdAt",
+          "type",
+          "data",
+          "resolution"
+        ]
+      },
+      "GeofenceEventDataDto": {
+        "type": "object",
+        "properties": {
+          "messageParams": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "description": "Parameters of the sentence (vessel and zone names, MMSIs, metres, minutes, knots)",
+            "example": {
+              "mmsi": 525005223,
+              "vesselName": "KM Mandiri 777"
+            }
+          },
+          "zoneKind": {
+            "type": "string",
+            "enum": [
+              "pipeline",
+              "transhipment_area",
+              "fishing_ground",
+              "mpa",
+              "restricted",
+              "anchorage",
+              "port",
+              "tss_lane",
+              "shallow_water",
+              "custom"
+            ]
+          },
+          "zoneCode": {
+            "type": "string",
+            "nullable": true
+          },
+          "zoneName": {
+            "type": "string",
+            "description": "Zone name when the event was raised"
+          },
+          "messageKey": {
+            "type": "string",
+            "enum": [
+              "surveillance.geofence.entered"
+            ],
+            "description": "Stable message key `surveillance.<detector>.<situation>` of the title and message (README \"Messages\"); rows written before 0.2.0 get it derived on read"
+          },
+          "sogKn": {
+            "type": "number",
+            "description": "Speed over ground at the entry, knots"
+          }
+        },
+        "required": [
+          "messageParams",
+          "zoneKind",
+          "zoneCode",
+          "zoneName",
+          "messageKey",
+          "sogKn"
+        ]
+      },
+      "GeofenceResolutionDto": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "English reason (kept for older clients; translate `code`)"
+          },
+          "supersededBy": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`escalated`: the alert of the same occurrence that superseded this one"
+          },
+          "duplicateOf": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A duplicate open row of the same `dedupKey` (opened by a second writer during a failover) ended together with this alert of the occurrence"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "escalated",
+              "left_zone",
+              "zone_deleted",
+              "zone_no_longer_alerts",
+              "other"
+            ],
+            "description": "Stable code of the reason (README \"Resolution codes\"; all codes: escalated, ais_resumed, navstatus_consistent, left_zone, loitering_ended, analysis_negative, pair_separated, zone_deleted, zone_no_longer_alerts, legacy_import, other)"
+          }
+        },
+        "required": [
+          "reason",
+          "code"
+        ]
+      },
+      "GeofenceEventDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Event id = alert id"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it happened"
+          },
+          "detector": {
+            "type": "string",
+            "example": "transhipment"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "safety",
+              "surveillance"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Published severity"
+          },
+          "currentSeverity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Current severity of the occurrence"
+          },
+          "mmsi": {
+            "type": "integer",
+            "example": 525005223
+          },
+          "relatedMmsi": {
+            "type": "integer",
+            "nullable": true
+          },
+          "vesselName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Vessel name from the fleet projection"
+          },
+          "relatedVesselName": {
+            "type": "string",
+            "nullable": true
+          },
+          "zoneId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "zoneName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Zone name from the GEO projection"
+          },
+          "lat": {
+            "type": "number",
+            "nullable": true
+          },
+          "lon": {
+            "type": "number",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "description": "English headline (`data.messageKey` / `messageParams` localize it)"
+          },
+          "message": {
+            "type": "string",
+            "description": "English sentence (see `title`)"
+          },
+          "methodId": {
+            "type": "string",
+            "example": "transhipment.accuracy",
+            "description": "Methodology catalog id (spec §17)"
+          },
+          "dedupKey": {
+            "type": "string",
+            "example": "transhipment:525000001:525000002"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "confirmed",
+              "dismissed",
+              "resolved"
+            ],
+            "description": "Review status (the detector lifecycle is `resolvedAt`)"
+          },
+          "openedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event time of the occurrence's latest signal"
+          },
+          "resolvedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the detector ended the occurrence"
+          },
+          "reviewedBy": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "reviewedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "note": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the event was recorded"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "geofence"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/GeofenceEventDataDto"
+          },
+          "resolution": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/GeofenceResolutionDto"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "time",
+          "detector",
+          "domain",
+          "severity",
+          "currentSeverity",
+          "mmsi",
+          "relatedMmsi",
+          "vesselName",
+          "relatedVesselName",
+          "zoneId",
+          "zoneName",
+          "lat",
+          "lon",
+          "title",
+          "message",
+          "methodId",
+          "dedupKey",
+          "status",
+          "openedAt",
+          "lastSeenAt",
+          "resolvedAt",
+          "reviewedBy",
+          "reviewedAt",
+          "note",
+          "createdAt",
+          "type",
+          "data",
+          "resolution"
+        ]
+      },
+      "FishingEventDataDto": {
+        "type": "object",
+        "properties": {
+          "messageParams": {
+            "type": "object",
+            "additionalProperties": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "description": "Parameters of the sentence (vessel and zone names, MMSIs, metres, minutes, knots)",
+            "example": {
+              "mmsi": 525005223,
+              "vesselName": "KM Mandiri 777"
+            }
+          },
+          "zoneKind": {
+            "type": "string",
+            "enum": [
+              "pipeline",
+              "transhipment_area",
+              "fishing_ground",
+              "mpa",
+              "restricted",
+              "anchorage",
+              "port",
+              "tss_lane",
+              "shallow_water",
+              "custom"
+            ]
+          },
+          "zoneCode": {
+            "type": "string",
+            "nullable": true
+          },
+          "zoneName": {
+            "type": "string",
+            "description": "Zone name when the event was raised"
+          },
+          "messageKey": {
+            "type": "string",
+            "enum": [
+              "surveillance.fishing.loitering"
+            ],
+            "description": "Stable message key `surveillance.<detector>.<situation>` of the title and message (README \"Messages\"); rows written before 0.2.0 get it derived on read"
+          },
+          "durationMin": {
+            "type": "number",
+            "description": "Duration of the pattern, minutes"
+          },
+          "positions": {
+            "type": "integer",
+            "description": "Fixes of the pattern"
+          },
+          "meanSogKn": {
+            "type": "number",
+            "description": "Mean speed over ground, knots"
+          },
+          "courseChangeRateDegPerMin": {
+            "type": "number",
+            "description": "Mean course-change rate, degrees per minute"
+          },
+          "totalCourseChangeDeg": {
+            "type": "number",
+            "description": "Total course change, degrees"
+          }
+        },
+        "required": [
+          "messageParams",
+          "zoneKind",
+          "zoneCode",
+          "zoneName",
+          "messageKey",
+          "durationMin",
+          "positions",
+          "meanSogKn",
+          "courseChangeRateDegPerMin",
+          "totalCourseChangeDeg"
+        ]
+      },
+      "FishingResolutionDto": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "English reason (kept for older clients; translate `code`)"
+          },
+          "supersededBy": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`escalated`: the alert of the same occurrence that superseded this one"
+          },
+          "duplicateOf": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A duplicate open row of the same `dedupKey` (opened by a second writer during a failover) ended together with this alert of the occurrence"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "escalated",
+              "left_zone",
+              "loitering_ended",
+              "other"
+            ],
+            "description": "Stable code of the reason (README \"Resolution codes\"; all codes: escalated, ais_resumed, navstatus_consistent, left_zone, loitering_ended, analysis_negative, pair_separated, zone_deleted, zone_no_longer_alerts, legacy_import, other)"
+          }
+        },
+        "required": [
+          "reason",
+          "code"
+        ]
+      },
+      "FishingEventDto": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Event id = alert id"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it happened"
+          },
+          "detector": {
+            "type": "string",
+            "example": "transhipment"
+          },
+          "domain": {
+            "type": "string",
+            "enum": [
+              "safety",
+              "surveillance"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Published severity"
+          },
+          "currentSeverity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "warning",
+              "critical"
+            ],
+            "description": "Current severity of the occurrence"
+          },
+          "mmsi": {
+            "type": "integer",
+            "example": 525005223
+          },
+          "relatedMmsi": {
+            "type": "integer",
+            "nullable": true
+          },
+          "vesselName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Vessel name from the fleet projection"
+          },
+          "relatedVesselName": {
+            "type": "string",
+            "nullable": true
+          },
+          "zoneId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "zoneName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Zone name from the GEO projection"
+          },
+          "lat": {
+            "type": "number",
+            "nullable": true
+          },
+          "lon": {
+            "type": "number",
+            "nullable": true
+          },
+          "title": {
+            "type": "string",
+            "description": "English headline (`data.messageKey` / `messageParams` localize it)"
+          },
+          "message": {
+            "type": "string",
+            "description": "English sentence (see `title`)"
+          },
+          "methodId": {
+            "type": "string",
+            "example": "transhipment.accuracy",
+            "description": "Methodology catalog id (spec §17)"
+          },
+          "dedupKey": {
+            "type": "string",
+            "example": "transhipment:525000001:525000002"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "confirmed",
+              "dismissed",
+              "resolved"
+            ],
+            "description": "Review status (the detector lifecycle is `resolvedAt`)"
+          },
+          "openedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event time of the occurrence's latest signal"
+          },
+          "resolvedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the detector ended the occurrence"
+          },
+          "reviewedBy": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true
+          },
+          "reviewedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "note": {
+            "type": "string",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the event was recorded"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "fishing"
+            ]
+          },
+          "data": {
+            "$ref": "#/components/schemas/FishingEventDataDto"
+          },
+          "resolution": {
+            "nullable": true,
+            "type": "object",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FishingResolutionDto"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "time",
+          "detector",
+          "domain",
+          "severity",
+          "currentSeverity",
+          "mmsi",
+          "relatedMmsi",
+          "vesselName",
+          "relatedVesselName",
+          "zoneId",
+          "zoneName",
+          "lat",
+          "lon",
+          "title",
+          "message",
+          "methodId",
+          "dedupKey",
+          "status",
+          "openedAt",
+          "lastSeenAt",
+          "resolvedAt",
+          "reviewedBy",
+          "reviewedAt",
+          "note",
+          "createdAt",
+          "type",
+          "data",
+          "resolution"
         ]
       },
       "CursorPageInfoDto": {
@@ -1119,28 +2911,6 @@
           "status"
         ]
       },
-      "PriorityDistributionDto": {
-        "type": "object",
-        "properties": {
-          "low": {
-            "type": "number",
-            "description": "P < 6, percent"
-          },
-          "medium": {
-            "type": "number",
-            "description": "6 ≤ P < 18, percent"
-          },
-          "high": {
-            "type": "number",
-            "description": "P ≥ 18, percent"
-          }
-        },
-        "required": [
-          "low",
-          "medium",
-          "high"
-        ]
-      },
       "TranshipmentResultDto": {
         "type": "object",
         "properties": {
@@ -1163,11 +2933,11 @@
             "description": "Larger MMSI of the pair"
           },
           "ship1Name": {
-            "type": "object",
+            "type": "string",
             "nullable": true
           },
           "ship2Name": {
-            "type": "object",
+            "type": "string",
             "nullable": true
           },
           "isIllegal": {
@@ -1219,12 +2989,12 @@
             "description": "Review status of the occurrence (`null` once its event expired)"
           },
           "lat": {
-            "type": "object",
+            "type": "number",
             "nullable": true,
             "description": "Midpoint of the two vessels in the middle of the window"
           },
           "lon": {
-            "type": "object",
+            "type": "number",
             "nullable": true
           },
           "methodId": {
@@ -1412,6 +3182,89 @@
           "fishingViolations"
         ]
       },
+      "StatsBucketDto": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Bucket start (the range start for the first bucket)"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Bucket end, exclusive (the range end, inclusive, for the last bucket)"
+          },
+          "total": {
+            "type": "integer"
+          },
+          "byType": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "example": {
+              "dark": 3,
+              "transhipment": 1
+            }
+          },
+          "bySeverity": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "example": {
+              "warning": 3,
+              "critical": 1
+            }
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "total",
+          "byType",
+          "bySeverity"
+        ]
+      },
+      "SurveillanceStatsSeriesDto": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "bucket": {
+            "type": "string",
+            "enum": [
+              "hour",
+              "day"
+            ]
+          },
+          "timeZone": {
+            "type": "string",
+            "example": "Asia/Jakarta"
+          },
+          "buckets": {
+            "description": "Every bucket of the range in order, empty ones included",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StatsBucketDto"
+            }
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "bucket",
+          "timeZone",
+          "buckets"
+        ]
+      },
       "FishingViolationDto": {
         "type": "object",
         "properties": {
@@ -1479,7 +3332,8 @@
         "properties": {
           "page": {
             "type": "integer",
-            "minimum": 1
+            "minimum": 1,
+            "maximum": 1000000
           },
           "pageSize": {
             "type": "integer",
@@ -1495,6 +3349,79 @@
         "required": [
           "page",
           "pageSize",
+          "total"
+        ]
+      },
+      "FishingViolationYearDto": {
+        "type": "object",
+        "properties": {
+          "year": {
+            "type": "integer",
+            "example": 2016
+          },
+          "count": {
+            "type": "integer",
+            "example": 163
+          }
+        },
+        "required": [
+          "year",
+          "count"
+        ]
+      },
+      "FishingViolationYearsDto": {
+        "type": "object",
+        "properties": {
+          "years": {
+            "description": "Oldest first",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FishingViolationYearDto"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "Records of every year"
+          }
+        },
+        "required": [
+          "years",
+          "total"
+        ]
+      },
+      "FishingViolationHeatmapDto": {
+        "type": "object",
+        "properties": {
+          "cells": {
+            "description": "Densest first",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HeatmapCellDto"
+            }
+          },
+          "cellKm": {
+            "type": "number",
+            "description": "Cell size, kilometres"
+          },
+          "cellDeg": {
+            "type": "number",
+            "description": "Cell size, degrees (ST_SnapToGrid)"
+          },
+          "year": {
+            "type": "integer",
+            "nullable": true,
+            "example": 2016
+          },
+          "total": {
+            "type": "integer",
+            "description": "Records counted"
+          }
+        },
+        "required": [
+          "cells",
+          "cellKm",
+          "cellDeg",
+          "year",
           "total"
         ]
       },

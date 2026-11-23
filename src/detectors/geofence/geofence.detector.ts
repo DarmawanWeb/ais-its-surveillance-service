@@ -13,7 +13,12 @@ import {
   geofenceTransition,
   isWatchedZone,
 } from '../../domain/geofence.js';
-import { AlertCoordinator } from '../shared/alert-coordinator.js';
+import {
+  type DetectorResolutionCode,
+  geofenceText,
+  resolution,
+} from '../../domain/messages.js';
+import { AlertKeyLock } from '../shared/alert-key-lock.js';
 import {
   optionalZoneKindList,
   zoneKindList,
@@ -48,10 +53,14 @@ export function geofenceKey(mmsi: number, zoneId: string): string {
  * Zone entry (geofence): an event when a vessel is inside an active zone of
  * kind `restricted` / `mpa` / `custom` (`GEOFENCE_KINDS`) with `alertOnEnter`
  * and no occurrence is open; resolved when it leaves, or when the zone is
- * deleted, deactivated or stops alerting. Global zones apply to every vessel,
+ * deleted, deactivated or stops alerting (zone changes are handled by the
+ * active instance; a takeover also ends the occurrences of zones that
+ * changed while no instance was active). Global zones apply to every vessel,
  * an organization's zones only to its own vessels. Severity: `critical` for
  * `GEOFENCE_CRITICAL_KINDS` (restricted), else `warning`. Dedup key
- * `geofence:<mmsi>:<zoneId>`.
+ * `geofence:<mmsi>:<zoneId>`. An entry opens its occurrence through the
+ * `AlertKeyLock` (aligned with `events`, stale positions open nothing), so an
+ * instance that resumes after a pause never opens one twice.
  *
  * @method geo.geofence_enter
  * @see ../../../../../docs/METHODOLOGY.md#geo.geofence_enter
@@ -67,7 +76,7 @@ export class GeofenceDetector implements Detector<GeofenceConfig> {
 
   constructor(
     private readonly recorder: VesselStateRecorder,
-    private readonly coordinator: AlertCoordinator,
+    private readonly lock: AlertKeyLock,
   ) {}
 
   async onPosition(
@@ -75,7 +84,6 @@ export class GeofenceDetector implements Detector<GeofenceConfig> {
     position: VesselPosition,
   ): Promise<void> {
     const { config } = context;
-    await this.coordinator.positionSeen(context.now());
     await this.recorder.observe(context, position);
     const inside = context.zones
       .zonesAt(position, {
@@ -90,23 +98,37 @@ export class GeofenceDetector implements Detector<GeofenceConfig> {
       const key = geofenceKey(position.mmsi, zone.id);
       if (geofenceTransition(context.alerts.isOpen(key), true) !== 'entered')
         continue;
-      await context.alerts.raise({
-        type: GEOFENCE_ALERT,
-        dedupKey: key,
-        severity: geofenceSeverity(zone.kind, config.CRITICAL_KINDS),
+      const { title, message, messageKey, messageParams } = geofenceText({
         mmsi: position.mmsi,
-        title: `Entered ${zone.name}`,
-        message: `Vessel ${position.mmsi} entered ${zone.name} (${zone.kind})`,
-        position,
-        occurredAt: position.time,
-        zoneId: zone.id,
-        data: {
-          zoneKind: zone.kind,
-          zoneCode: zone.code,
-          zoneName: zone.name,
-          sogKn: position.sog,
-        },
+        vesselName: context.fleet.byMmsi(position.mmsi)?.name,
+        zoneName: zone.name,
+        zoneKind: zone.kind,
+        zoneCode: zone.code,
+        sogKn: position.sog,
       });
+      await this.lock.raiseFromPosition(
+        context.alerts,
+        {
+          type: GEOFENCE_ALERT,
+          dedupKey: key,
+          severity: geofenceSeverity(zone.kind, config.CRITICAL_KINDS),
+          mmsi: position.mmsi,
+          title,
+          message,
+          position,
+          occurredAt: position.time,
+          zoneId: zone.id,
+          data: {
+            zoneKind: zone.kind,
+            zoneCode: zone.code,
+            zoneName: zone.name,
+            sogKn: position.sog,
+            messageKey,
+            messageParams,
+          },
+        },
+        position.time,
+      );
     }
 
     const insideIds = new Set(inside.map((zone) => zone.id));
@@ -116,28 +138,52 @@ export class GeofenceDetector implements Detector<GeofenceConfig> {
       if (geofenceTransition(wasInside, isInside) === 'left') {
         await context.alerts.resolve(open.dedupKey, {
           at: position.time,
-          reason: 'left the zone',
+          ...resolution('left_zone'),
         });
       }
     }
   }
 
+  /**
+   * Zone changes reach every instance; only the active one ends occurrences
+   * (a standby's state is replaced from `events` when it takes over).
+   */
   async onZoneChanged(
     context: DetectorContext<GeofenceConfig>,
     change: DetectorZoneChange,
   ): Promise<void> {
+    if (!context.isActive()) return;
     const watched =
       change.kind === 'upserted' &&
       isWatchedZone(change.zone, context.config.KINDS);
     if (watched) return;
+    const code: DetectorResolutionCode =
+      change.kind === 'deleted' ? 'zone_deleted' : 'zone_no_longer_alerts';
     for (const open of context.alerts.open()) {
       if (open.zoneId !== change.zone.id) continue;
       await context.alerts.resolve(open.dedupKey, {
         at: context.now(),
-        reason:
-          change.kind === 'deleted'
-            ? 'zone deleted'
-            : 'zone no longer alerts on entry',
+        ...resolution(code),
+      });
+    }
+  }
+
+  /**
+   * A takeover: the open occurrences were just reloaded from `events`; end
+   * those whose zone was deleted or stopped alerting while no instance was
+   * active (their zone change was skipped by every standby).
+   */
+  async onActivated(context: DetectorContext<GeofenceConfig>): Promise<void> {
+    for (const open of context.alerts.open()) {
+      if (open.zoneId === null) continue;
+      const zone = context.zones.get(open.zoneId);
+      if (zone !== undefined && isWatchedZone(zone, context.config.KINDS))
+        continue;
+      await context.alerts.resolve(open.dedupKey, {
+        at: context.now(),
+        ...resolution(
+          zone === undefined ? 'zone_deleted' : 'zone_no_longer_alerts',
+        ),
       });
     }
   }

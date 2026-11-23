@@ -1,8 +1,13 @@
 import {
+  type AlertRaisedV1,
+  type AlertResolvedV1,
+  type AnyEventEnvelope,
+  encodeEnvelope,
   EVENT_TYPES,
   parseEnvelope,
+  streamForSubject,
+  subjectForEvent,
   subjects,
-  type AlertRaisedV1,
   type VesselSnapshotV1,
   type ZoneSnapshotV1,
 } from '@darmawanweb/ais-its-contracts/events';
@@ -13,10 +18,16 @@ import {
   toPositionPayload,
 } from '@darmawanweb/ais-its-nest/analytics';
 import { PG_POOL } from '@darmawanweb/ais-its-nest/db';
-import { EventPublisher, NatsClient } from '@darmawanweb/ais-its-nest/nats';
-import { waitFor } from '@darmawanweb/ais-its-nest/testing';
+import {
+  EventPublisher,
+  NatsClient,
+  StreamManager,
+} from '@darmawanweb/ais-its-nest/nats';
+import { createTestConfig, waitFor } from '@darmawanweb/ais-its-nest/testing';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import type { Pool } from 'pg';
+
+import { configSchema } from '../../src/config.js';
 
 /** A unique, valid 9-digit MMSI per call (tests share the containers). */
 let nextMmsi = 200_000_000 + Math.floor(Math.random() * 500_000_000);
@@ -92,68 +103,106 @@ export class Fixtures {
   async positions(inputs: readonly PositionInput[]): Promise<void> {
     const last = new Map<number, PositionInput>();
     for (const input of inputs) {
-      const previous = last.get(input.mmsi);
       await this.publisher.publishEvent(
         EVENT_TYPES.AIS_POSITION_RECORDED,
-        toPositionPayload({
-          mmsi: input.mmsi,
-          time: input.time,
-          source: input.source ?? 'primary',
-          lat: input.lat,
-          lon: input.lon,
-          sog: input.sog ?? 0,
-          cog: input.cog ?? 0,
-          hdg: input.hdg ?? 511,
-          navstatus: input.navstatus ?? 0,
-          predictedNavstatus: input.predictedNavstatus ?? 0,
-          coastDistanceM: null,
-          previous:
-            previous === undefined
-              ? null
-              : {
-                  time: previous.time,
-                  lat: previous.lat,
-                  lon: previous.lon,
-                  sog: previous.sog ?? 0,
-                  cog: previous.cog ?? 0,
-                  hdg: previous.hdg ?? 511,
-                  navstatus: previous.navstatus ?? 0,
-                  predictedNavstatus: previous.predictedNavstatus ?? 0,
-                },
-        }),
+        positionPayload(input, last.get(input.mmsi)),
       );
       last.set(input.mmsi, input);
     }
   }
 
-  /** Number of `alert.raised.v1` messages stored for a type and vessel. */
-  async alertCount(type: string, mmsi: number): Promise<number> {
-    const { manager } = this.app.get(NatsClient);
+  /**
+   * The `ALERTS` messages of a type and vessel, oldest first: raises and
+   * resolutions share the subject `alert.v1.<type>.<mmsi>`.
+   */
+  async alertMessages(
+    type: string,
+    mmsi: number,
+  ): Promise<
+    (
+      | { readonly kind: 'raised'; readonly data: AlertRaisedV1 }
+      | { readonly kind: 'resolved'; readonly data: AlertResolvedV1 }
+    )[]
+  > {
+    const { jetstream } = this.app.get(NatsClient);
     const subject = subjects.alert(type, mmsi);
-    const info = await manager.streams.info('ALERTS', {
-      subjects_filter: subject,
+    const messages: Awaited<ReturnType<Fixtures['alertMessages']>> = [];
+    // An ordered (ephemeral) consumer of the vessel's subject, read to its end.
+    const consumer = await jetstream.consumers.get('ALERTS', {
+      filter_subjects: [subject],
     });
-    return info.state.subjects?.[subject] ?? 0;
+    try {
+      for (;;) {
+        const batch = await consumer.fetch({
+          max_messages: 100,
+          expires: 1_000,
+        });
+        let received = 0;
+        let pending = 0;
+        for await (const message of batch) {
+          received += 1;
+          pending = message.info.pending;
+          const parsed = parseEnvelope(message.data);
+          if (!parsed.success) continue;
+          const { envelope } = parsed;
+          if (envelope.type === EVENT_TYPES.ALERT_RAISED)
+            messages.push({ kind: 'raised', data: envelope.data });
+          else if (envelope.type === EVENT_TYPES.ALERT_RESOLVED)
+            messages.push({ kind: 'resolved', data: envelope.data });
+        }
+        if (received === 0 || pending === 0) break;
+      }
+    } finally {
+      await consumer.delete().catch(() => undefined);
+    }
+    return messages;
   }
 
-  /** Waits for the latest alert of a type and vessel in the `ALERTS` stream. */
+  /** Number of `alert.raised.v1` messages stored for a type and vessel. */
+  async alertCount(type: string, mmsi: number): Promise<number> {
+    const messages = await this.alertMessages(type, mmsi);
+    return messages.filter((message) => message.kind === 'raised').length;
+  }
+
+  /** The `alert.resolved.v1` payloads stored for a type and vessel. */
+  async resolvedEvents(type: string, mmsi: number): Promise<AlertResolvedV1[]> {
+    const messages = await this.alertMessages(type, mmsi);
+    return messages.flatMap((message) =>
+      message.kind === 'resolved' ? [message.data] : [],
+    );
+  }
+
+  /** Waits for the latest `alert.raised.v1` of a type and vessel in `ALERTS`. */
   async waitForAlert(
     type: string,
     mmsi: number,
     timeoutMs = 20_000,
   ): Promise<AlertRaisedV1> {
-    const { manager } = this.app.get(NatsClient);
-    const stored = await waitFor(
-      () =>
-        manager.streams.getMessage('ALERTS', {
-          last_by_subj: subjects.alert(type, mmsi),
-        }),
+    return waitFor(
+      async () => {
+        const messages = await this.alertMessages(type, mmsi);
+        return messages.findLast((message) => message.kind === 'raised')?.data;
+      },
       { timeoutMs },
     );
-    const parsed = parseEnvelope(stored.data);
-    if (!parsed.success || parsed.envelope.type !== EVENT_TYPES.ALERT_RAISED)
-      throw new Error(`Not an alert: ${stored.subject}`);
-    return parsed.envelope.data;
+  }
+
+  /** Waits for the latest `alert.resolved.v1` of a type and vessel in `ALERTS`. */
+  async waitForResolution(
+    type: string,
+    mmsi: number,
+    timeoutMs = 20_000,
+  ): Promise<AlertResolvedV1> {
+    return waitFor(
+      async () => {
+        const messages = await this.alertMessages(type, mmsi);
+        const found = messages.findLast(
+          (message) => message.kind === 'resolved',
+        );
+        return found?.kind === 'resolved' ? found.data : undefined;
+      },
+      { timeoutMs },
+    );
   }
 
   /** Rows of a query (`search_path` is the service schema). */
@@ -163,6 +212,76 @@ export class Fixtures {
   ): Promise<Row[]> {
     const result = await this.pool.query<Row>(text, values);
     return result.rows;
+  }
+}
+
+/** The `ais.position.recorded.v1` payload of a position (`previous`: the vessel's last one). */
+export function positionPayload(
+  input: PositionInput,
+  previous?: PositionInput,
+): ReturnType<typeof toPositionPayload> {
+  return toPositionPayload({
+    mmsi: input.mmsi,
+    time: input.time,
+    source: input.source ?? 'primary',
+    lat: input.lat,
+    lon: input.lon,
+    sog: input.sog ?? 0,
+    cog: input.cog ?? 0,
+    hdg: input.hdg ?? 511,
+    navstatus: input.navstatus ?? 0,
+    predictedNavstatus: input.predictedNavstatus ?? 0,
+    coastDistanceM: null,
+    previous:
+      previous === undefined
+        ? null
+        : {
+            time: previous.time,
+            lat: previous.lat,
+            lon: previous.lon,
+            sog: previous.sog ?? 0,
+            cog: previous.cog ?? 0,
+            hdg: previous.hdg ?? 511,
+            navstatus: previous.navstatus ?? 0,
+            predictedNavstatus: previous.predictedNavstatus ?? 0,
+          },
+  });
+}
+
+/**
+ * Publishes envelopes through a NATS connection of its own, e.g. before any
+ * application of a test runs.
+ */
+export async function publishWithoutApp(
+  natsUrl: string,
+  envelopes: readonly AnyEventEnvelope[],
+): Promise<void> {
+  const nats = new NatsClient(
+    createTestConfig(configSchema, { NATS_URL: natsUrl }),
+    {},
+  );
+  const { jetstream } = await nats.ready();
+  try {
+    // The streams exist once a service started; create them otherwise.
+    await new StreamManager(nats).ensure(
+      [
+        ...new Set(
+          envelopes.flatMap((envelope) => {
+            const stream = streamForSubject(subjectForEvent(envelope));
+            return stream === undefined ? [] : [stream.name];
+          }),
+        ),
+      ],
+      'producer',
+    );
+    for (const envelope of envelopes)
+      await jetstream.publish(
+        subjectForEvent(envelope),
+        encodeEnvelope(envelope),
+        { msgID: envelope.id },
+      );
+  } finally {
+    await nats.onApplicationShutdown();
   }
 }
 

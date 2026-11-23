@@ -1,7 +1,7 @@
 import { DetectorTestHarness } from '@darmawanweb/ais-its-nest/analytics';
 import { describe, expect, it } from 'vitest';
 
-import { LocalAlertCoordinator } from '../shared/__testing__/local-alert-coordinator.js';
+import { DirectAlertKeyLock } from '../shared/__testing__/direct-alert-key-lock.js';
 import { MemoryVesselStates } from '../shared/__testing__/memory-storage.js';
 import { VesselStateRecorder } from '../shared/vessel-state.recorder.js';
 import { AnomalyDetector, anomalyKey } from './anomaly.detector.js';
@@ -12,16 +12,15 @@ const START = new Date('2026-04-01T00:00:00Z');
 function setup(
   env: Record<string, string> = {},
   states = new MemoryVesselStates(),
+  lock = new DirectAlertKeyLock(),
 ) {
   const recorder = new VesselStateRecorder(states, { writeIntervalMs: 60_000 });
   const harness = DetectorTestHarness.create({
-    detectors: [
-      new AnomalyDetector(recorder, states, new LocalAlertCoordinator()),
-    ],
+    detectors: [new AnomalyDetector(recorder, states, lock)],
     env,
     now: START,
   });
-  return { harness, states };
+  return { harness, states, lock };
 }
 
 /** A vessel reporting "at anchor" (1) while predicted under way (0). */
@@ -54,6 +53,24 @@ describe('AnomalyDetector', () => {
 
     await harness.position(anomalous); // still the same occurrence
     expect(harness.alerts).toHaveLength(1);
+  });
+
+  it('opens an occurrence through the key lock, never from a position older than its last end', async () => {
+    const lock = new DirectAlertKeyLock();
+    const { harness } = setup({}, new MemoryVesselStates(), lock);
+    // Another instance ended the occurrence later than these positions.
+    lock.endedAt.set(anomalyKey(MMSI), new Date(START.getTime() + 10 * 60_000));
+    await harness.track([anomalous, anomalous, anomalous]);
+    expect(lock.keys).toEqual([anomalyKey(MMSI)]);
+    expect(harness.alerts).toEqual([]);
+
+    await harness.position({
+      ...anomalous,
+      time: new Date(START.getTime() + 11 * 60_000),
+    });
+    expect(harness.alerts).toEqual([
+      expect.objectContaining({ dedupKey: anomalyKey(MMSI) }),
+    ]);
   });
 
   it('resolves when the status is consistent again, and a break restarts the count', async () => {
@@ -151,6 +168,55 @@ describe('AnomalyDetector', () => {
     // Streak 1, 2, 3 (capped), then the 60 s throttle: one write at +80 s.
     expect(states.writes).toBe(4);
     expect(states.states.get(MMSI)?.anomalyStreak).toBe(3);
+  });
+
+  it('reloads the stored streaks after a takeover (the other instance kept counting)', async () => {
+    const { harness, states } = setup();
+    await harness.track([anomalous, anomalous]); // streak 2 in memory
+    await harness.deactivate();
+    // The other instance counted a consistent position meanwhile.
+    await states.save(
+      {
+        ...consistent,
+        time: new Date(START.getTime() + 15_000),
+        source: 'primary',
+        cog: 0,
+        hdg: 511,
+        coastDistanceM: null,
+        previous: null,
+      },
+      [],
+      { anomalyStreak: 0 },
+    );
+    await harness.activate();
+    await harness.position(anomalous); // streak 1 (stored 0 + 1), not 3
+    expect(harness.alertsOf('anomaly')).toEqual([]);
+    expect(states.states.get(MMSI)?.anomalyStreak).toBe(1);
+  });
+
+  it('carries the message key and parameters in the alert data', async () => {
+    const { harness } = setup();
+    await harness.vessel({ mmsi: MMSI, name: 'KM Delta' });
+    await harness.track([anomalous, anomalous, anomalous]);
+    expect(harness.alertsOf('anomaly')[0]).toMatchObject({
+      title: `Navigational status anomaly of ${MMSI}`,
+      data: {
+        messageKey: 'surveillance.anomaly.navstatus_mismatch',
+        messageParams: {
+          mmsi: MMSI,
+          vesselName: 'KM Delta',
+          navstatus: 1,
+          predictedNavstatus: 0,
+          predictedLabel: 'under way',
+          streak: 3,
+        },
+      },
+    });
+    await harness.position(consistent);
+    expect(harness.resolutions[0]).toMatchObject({
+      reason: 'navigational status consistent again',
+      data: { code: 'navstatus_consistent' },
+    });
   });
 });
 

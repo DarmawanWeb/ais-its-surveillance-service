@@ -61,12 +61,24 @@ export class TranshipmentsService {
     principal: Principal,
     query: ListTranshipmentsQueryDto,
   ): Promise<CursorPage<TranshipmentResultView>> {
-    const { from, to } = resolveQueryTimeRange(query, {
-      defaultDurationMs: EVENTS_DEFAULT_RANGE_MS,
-      maxDurationMs: EVENTS_MAX_RANGE_MS,
-    });
+    // One event's analyses: every window unless the query bounds it.
+    const range =
+      query.eventId !== undefined &&
+      query.from === undefined &&
+      query.to === undefined
+        ? undefined
+        : resolveQueryTimeRange(query, {
+            defaultDurationMs: EVENTS_DEFAULT_RANGE_MS,
+            maxDurationMs: EVENTS_MAX_RANGE_MS,
+          });
     const rows = await this.results.list(
-      { visibility: eventVisibility(principal), from, to, mmsi: query.mmsi },
+      {
+        visibility: eventVisibility(principal),
+        from: range?.from,
+        to: range?.to,
+        mmsi: query.mmsi,
+        eventId: query.eventId,
+      },
       decodeQueryCursor(query, EventCursorSchema),
       query.limit + 1,
     );

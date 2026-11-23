@@ -12,6 +12,7 @@ import { FishingViolationsModule } from './modules/fishing-violations/fishing-vi
 import { MethodologyModule } from './modules/methodology/methodology.module.js';
 import { StatisticsModule } from './modules/statistics/statistics.module.js';
 import { TranshipmentsModule } from './modules/transhipments/transhipments.module.js';
+import { MIGRATIONS_DIR } from './service.js';
 
 /**
  * Root module. `bootstrapService()` wraps it in the kit's platform root module
@@ -21,8 +22,9 @@ import { TranshipmentsModule } from './modules/transhipments/transhipments.modul
  */
 @Module({
   imports: [
-    // pg pool + drizzle (search_path=<DATABASE_SCHEMA>,public); migrations on boot.
-    DatabaseModule.forRoot({ schema }),
+    // pg pool + drizzle (search_path=<DATABASE_SCHEMA>,public); migrations on boot
+    // from this package's migrations/ (not the working directory).
+    DatabaseModule.forRoot({ schema, migrationsDir: MIGRATIONS_DIR }),
     // Streams this service PRODUCES to (created / widened at boot): alerts and
     // audit records. Consumers only create a missing stream they read.
     NatsModule.forRoot({ streams: ['ALERTS', 'AUDIT'] }),

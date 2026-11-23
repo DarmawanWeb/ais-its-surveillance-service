@@ -7,11 +7,12 @@ import {
   bboxEnvelope,
   type Database,
   InjectDb,
+  rowDate,
+  rowDateOrNull,
 } from '@darmawanweb/ais-its-nest/db';
 import { Injectable } from '@nestjs/common';
 import { type SQL, sql } from 'drizzle-orm';
 
-import { type RawTimestamp, rowDate, rowDateOrNull } from '../../db/rows.js';
 import type * as schema from '../../db/schema.js';
 import {
   type EventVisibility,
@@ -62,6 +63,16 @@ export interface EventFilters {
   readonly status?: SurveillanceEventStatus | undefined;
   readonly mmsi?: number | undefined;
   readonly bbox?: BBox | undefined;
+  /** `true`: occurrences the detectors have not ended; `false`: ended ones. */
+  readonly active?: boolean | undefined;
+  readonly zoneId?: string | undefined;
+  /** Part of a vessel name (either vessel), or the leading digits of an MMSI. */
+  readonly vesselSearch?: string | undefined;
+}
+
+/** `text` as a `LIKE` pattern matching it literally anywhere (`%`, `_`, `\\` escaped). */
+export function containsPattern(text: string): string {
+  return `%${text.replaceAll(/[\\%_]/g, (char) => `\\${char}`)}%`;
 }
 
 /** Position of the last row of a page (`time` DESC, `id` DESC). */
@@ -81,7 +92,7 @@ export interface EventReview {
 
 interface EventRow extends Record<string, unknown> {
   id: string;
-  time: RawTimestamp;
+  time: Date | string;
   detector: string;
   type: string;
   domain: 'safety' | 'surveillance';
@@ -101,14 +112,14 @@ interface EventRow extends Record<string, unknown> {
   dedup_key: string;
   data: Record<string, unknown>;
   status: SurveillanceEventStatus;
-  opened_at: RawTimestamp;
-  last_seen_at: RawTimestamp;
-  resolved_at: RawTimestamp | null;
+  opened_at: Date | string;
+  last_seen_at: Date | string;
+  resolved_at: Date | string | null;
   resolution: Record<string, unknown> | null;
   reviewed_by: string | null;
-  reviewed_at: RawTimestamp | null;
+  reviewed_at: Date | string | null;
   note: string | null;
-  created_at: RawTimestamp;
+  created_at: Date | string;
 }
 
 const SELECT_EVENTS = sql`
@@ -181,6 +192,33 @@ export function eventConditions(filters: EventFilters): SQL[] {
     conditions.push(
       sql`ST_Intersects(e.geom::geometry, ${bboxEnvelope(filters.bbox)})`,
     );
+  if (filters.active !== undefined)
+    conditions.push(
+      filters.active
+        ? sql`e.resolved_at IS NULL`
+        : sql`e.resolved_at IS NOT NULL`,
+    );
+  if (filters.zoneId !== undefined)
+    conditions.push(sql`e.zone_id = ${filters.zoneId}::uuid`);
+  const search = filters.vesselSearch?.trim();
+  if (search !== undefined && search !== '') {
+    // Vessel names from the FLEET projection (current owner's name), either
+    // vessel of the event; digits also match the start of an MMSI.
+    const named = sql`SELECT v.mmsi FROM vessels v
+      WHERE v.deleted_at IS NULL AND v.name ILIKE ${containsPattern(search)}`;
+    const matches = [
+      sql`e.mmsi IN (${named})`,
+      sql`e.related_mmsi IN (${named})`,
+    ];
+    if (/^\d{1,9}$/.test(search)) {
+      const prefix = `${search}%`;
+      matches.push(
+        sql`e.mmsi::text LIKE ${prefix}`,
+        sql`e.related_mmsi::text LIKE ${prefix}`,
+      );
+    }
+    conditions.push(sql`(${sql.join(matches, sql` OR `)})`);
+  }
   return conditions;
 }
 
